@@ -94,6 +94,9 @@ confirmed in place (the message is edited), changes made in LuCI or on the route
 - **Services → Netmode → Dashboard** — state, controls, live tiles and the graphs, refreshed every second:
   game-WAN ping (1 s pings with a 10 s median), each gaming device's upload against the game-mode threshold, and
   every WAN's probe ping; 5 min to 3 h, one crosshair across all of them.
+- **Services → Netmode → Monitor** — the same live board in full screen for a second (wide) monitor: LuCI's menus
+  are hidden and the charts are sized to the window, so everything fits without scrolling (press F11 for a full
+  browser window; ✕ goes back).
 - **Services → Netmode → Match reports** — median ping per game WAN, a dot per match, the full list, filter by device.
 - **Services → Netmode → Settings** — everything below, including picking the gaming devices from the LAN's known hosts.
 
@@ -197,8 +200,8 @@ files/                                         installed as-is on the router
 ├── usr/share/rpcd/acl.d/luci-app-netmode.json
 ├── usr/share/luci/menu.d/luci-app-netmode.json
 └── www/luci-static/resources/
-    ├── netmode/ui.js                          shared LuCI code: controls, charts
-    ├── view/netmode/                          dashboard, match reports, settings
+    ├── netmode/ui.js                          shared LuCI code: controls, charts, the live board
+    ├── view/netmode/                          dashboard, monitor (full screen), match reports, settings
     └── view/status/include/15_netmode.js      Overview widget
 install.sh, uninstall.sh                       run on the router
 deploy.ps1, deploy.sh                          copy + install from a PC

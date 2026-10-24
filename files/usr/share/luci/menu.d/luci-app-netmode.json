@@ -19,6 +19,14 @@
 			"path": "netmode/dashboard"
 		}
 	},
+	"admin/services/netmode/monitor": {
+		"title": "Monitor",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "netmode/monitor"
+		}
+	},
 	"admin/services/netmode/matches": {
 		"title": "Match reports",
 		"order": 20,

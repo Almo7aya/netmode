@@ -67,7 +67,28 @@ var CSS = [
 	'.nm-tip b{font-weight:600;margin-right:6px}',
 	'.nm-tip .k{display:inline-block;width:12px;height:2px;vertical-align:middle;margin-right:6px;border-radius:1px}',
 	'.nm-tip .m{opacity:.65}',
-	'.nm table td,.nm table th{font-variant-numeric:tabular-nums}'
+	'.nm table td,.nm table th{font-variant-numeric:tabular-nums}',
+	'.nm-bar-row{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}',
+	// full-screen monitor: LuCI's header, tabs and footer go, the page fills the window without scrolling
+	'body.nm-kiosk{padding:0!important;margin:0!important;overflow:hidden}',
+	'body.nm-kiosk>header,body.nm-kiosk>footer,body.nm-kiosk #tabmenu{display:none!important}',
+	'body.nm-kiosk #maincontent{max-width:none!important;width:auto!important;margin:0!important;padding:10px 14px!important}',
+	'.nm-mon{height:calc(100vh - 20px);display:flex;flex-direction:column;gap:10px}',
+	'.nm-mon-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px}',
+	'.nm-mon-bar .nm-seg{margin:0;align-items:center}',
+	'.nm-mon-bar .nm-label{margin:0 2px 0 0}',
+	'.nm-mon-bar .grow{flex:1}',
+	'.nm-mon-bar .nm-x{font-size:18px;text-decoration:none;opacity:.6;padding:0 4px;color:inherit}',
+	'.nm-mon .nm-tiles{grid-template-columns:repeat(5,minmax(0,1fr));margin:0}',
+	'.nm-mon .nm-tile .v{font-size:34px;line-height:1.15}',
+	'.nm-mon-charts{flex:1;min-height:0;display:grid;gap:10px;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);',
+	'grid-template-rows:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"ping wans" "ping udp"}',
+	'.nm-cell{border:1px solid var(--nm-line);border-radius:10px;padding:8px 12px;display:flex;flex-direction:column;min-height:0;background:var(--nm-fill)}',
+	'.nm-cell-ping{grid-area:ping}.nm-cell-wans{grid-area:wans}.nm-cell-udp{grid-area:udp}',
+	'.nm-cell .nm-plot{flex:1;min-height:0}',
+	'.nm-cell .nm-legend{margin:4px 0 0}',
+	'@media (max-width:1100px){.nm-mon-charts{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr);',
+	'grid-template-areas:"ping" "wans" "udp"}.nm-mon .nm-tiles{grid-template-columns:repeat(3,minmax(0,1fr))}}'
 ].join('');
 
 function S(tag, attrs, children) {
@@ -102,6 +123,8 @@ function surfaceOf(node) {
 }
 
 function fmt(v) { return String(+v.toFixed(v < 10 && v % 1 ? 1 : 0)); }
+
+var hoverHide = function() {};
 
 return baseclass.extend({
 	S: S,
@@ -289,6 +312,7 @@ return baseclass.extend({
 		return {
 			svg: svg,
 			x: x,
+			W: W, L: f.L, R: f.R, t0: f.t0, t1: f.t1,
 			clipped: clipped.length,
 			show: function(at) {
 				var xx = x(at);
@@ -307,40 +331,43 @@ return baseclass.extend({
 		};
 	},
 
-	/* One crosshair + tooltip across charts drawn in the same frame.
-	 * times: timestamps to snap to; tip(ts) -> [nodes]; state keeps the hovered time across redraws */
-	syncHover: function(host, charts, frame, W, times, tip, state) {
-		var box = E('div', { 'class': 'nm-tip', 'style': 'display:none' });
-		host.appendChild(box);
-		requestAnimationFrame(function() { host.style.setProperty('--nm-ring', surfaceOf(host)); });
-		var x = function(ts) { return frame.L + (ts - frame.t0) / (frame.t1 - frame.t0) * (W - frame.L - frame.R); };
-		var show = function(at, clientY) {
+	/* One crosshair across charts that share a time range (any sizes / positions) and one tooltip at the pointer.
+	 * times: sorted timestamps to snap to; tip(ts) -> [nodes]; state keeps the hover across the 1 s redraws */
+	hoverGroup: function(charts, times, tip, state) {
+		var box = document.getElementById('nm-tip');
+		if (!box) {
+			box = E('div', { 'id': 'nm-tip', 'class': 'nm nm-tip', 'style': 'display:none;position:fixed' });
+			document.body.appendChild(box);
+			// a redraw replaces the charts under the pointer: hide when the pointer is no longer on any chart
+			document.addEventListener('pointermove', function(ev) { if (!ev.target.closest || !ev.target.closest('svg.plot')) hoverHide(); });
+		}
+		var show = function(at, cx, cy) {
 			if (!times.length) return;
 			var lo = 0, hi = times.length - 1;
 			while (hi - lo > 1) { var mid = (lo + hi) >> 1; if (times[mid] < at) lo = mid; else hi = mid; }
 			var best = Math.abs(times[lo] - at) <= Math.abs(times[hi] - at) ? times[lo] : times[hi];
-			state.hover = best;
-			if (clientY != null) state.hoverY = clientY - host.getBoundingClientRect().top;
+			state.hover = best; state.cx = cx; state.cy = cy;
 			charts.forEach(function(c) { c.show(best); });
 			box.replaceChildren.apply(box, tip(best));
 			box.style.display = '';
-			var px = x(best) * host.clientWidth / W, w = box.offsetWidth;
-			box.style.left = (px + 16 + w > host.clientWidth ? Math.max(0, px - w - 16) : px + 16) + 'px';
-			box.style.top = Math.max(0, Math.min((state.hoverY || 60) - 24, host.clientHeight - box.offsetHeight)) + 'px';
+			var w = box.offsetWidth, h = box.offsetHeight, left = cx + 18, top = cy + 14;
+			if (left + w > window.innerWidth - 8) left = cx - w - 18;
+			if (top + h > window.innerHeight - 8) top = window.innerHeight - h - 8;
+			box.style.left = Math.max(4, left) + 'px';
+			box.style.top = Math.max(4, top) + 'px';
 		};
-		var hide = function() {
+		hoverHide = function() {
 			state.hover = null;
 			box.style.display = 'none';
 			charts.forEach(function(c) { c.hide(); });
 		};
 		charts.forEach(function(c) {
 			c.svg.addEventListener('pointermove', function(ev) {
-				var r = c.svg.getBoundingClientRect(), vx = (ev.clientX - r.left) * W / r.width;
-				show(frame.t0 + (vx - frame.L) / (W - frame.L - frame.R) * (frame.t1 - frame.t0), ev.clientY);
+				var r = c.svg.getBoundingClientRect(), vx = (ev.clientX - r.left) * c.W / r.width;
+				show(c.t0 + (vx - c.L) / (c.W - c.L - c.R) * (c.t1 - c.t0), ev.clientX, ev.clientY);
 			});
-			c.svg.addEventListener('pointerleave', hide);
 		});
-		if (state.hover != null && state.hover >= frame.t0) show(state.hover); else hide();
+		if (state.hover != null && charts.length && state.hover >= charts[0].t0) show(state.hover, state.cx, state.cy); else hoverHide();
 	},
 
 	tipRow: function(value, label, color) {
@@ -373,6 +400,285 @@ return baseclass.extend({
 
 	spikeKey: function() {
 		return S('svg', { 'width': 10, 'height': 10 }, [ S('path', { 'd': 'M1,9L9,9L5,2Z', 'fill': 'currentColor', 'fill-opacity': 0.75 }) ]);
+	},
+
+	boardLoad: function() {
+		return Promise.all([ this.status(), this.history(0), this.live(0) ]);
+	},
+
+	/* The live board: status, controls, tiles and the three charts, refreshed every second. The 5 and 15 min
+	 * ranges use the sampler's 1 s points, 1 h and 3 h the daemon's 10 s history.
+	 * kiosk: full-screen layout for a second monitor (LuCI's chrome hidden, charts sized to the window). */
+	board: function(res, kiosk, poll) {
+		var nm = this;
+		var LIVE_KEEP = 900, HIST_KEEP = 10800;
+		var RANGES = [ [ 300, _('5 min') ], [ 900, _('15 min') ], [ 3600, _('1 h') ], [ 10800, _('3 h') ] ];
+		var SRC = { server: _('the game server itself'), edge: _('the last router in front of the game server'), default: _('default target') };
+		var d = { st: {}, hist: [], probes: [], live: [], histLast: 0, liveLast: 0, n: 0, key: '', ok: Date.now() };
+		var vs = { range: 900, hover: null };
+		var kbs = function(v) { return v == null ? '—' : v < 10 ? v.toFixed(1) : String(Math.round(v)); };
+		var tile = function(label, value, unit, desc) {
+			return E('div', { 'class': 'nm-tile' }, [ E('div', { 'class': 'nm-label' }, [ label ]),
+				E('div', { 'class': 'v' }, [ value, unit ? E('small', {}, [ unit ]) : '' ]), E('div', { 'class': 'd' }, desc) ]);
+		};
+		var stats = function(rows) {
+			var v = rows.filter(function(r) { return r.ping != null; }).map(function(r) { return r.ping; }), j = 0;
+			for (var i = 1; i < v.length; i++) j += Math.abs(v[i] - v[i - 1]);
+			var lost = rows.reduce(function(s, r) { return s + (r.lossPct || 0); }, 0);
+			return { avg: v.length ? v.reduce(function(s, x) { return s + x; }, 0) / v.length : null,
+				jitter: v.length > 1 ? j / (v.length - 1) : null, loss: rows.length ? lost / rows.length : null };
+		};
+
+		var merge = function(st, h, lv) {
+			if (st) d.st = st;
+			if (h) {
+				(h.points || []).forEach(function(p) { if (p[0] > d.histLast) { d.hist.push(p); d.histLast = p[0]; } });
+				(h.probes || []).forEach(function(p) { if (!d.probes.length || p[0] > d.probes[d.probes.length - 1][0]) d.probes.push(p); });
+				d.hist = d.hist.filter(function(p) { return p[0] > d.histLast - HIST_KEEP; });
+				d.probes = d.probes.filter(function(p) { return p[0] > d.histLast - HIST_KEEP; });
+			}
+			if (lv) {
+				(lv.points || []).forEach(function(p) { if (p[0] > d.liveLast) { d.live.push(p); d.liveLast = p[0]; } });
+				d.live = d.live.filter(function(p) { return p[0] > d.liveLast - LIVE_KEEP; });
+			}
+		};
+		// rows in one shape for both sources: { ts, ping, lossPct, state, gw, dev: { ip: KB/s } }
+		var rows = function(useLive) {
+			var iv = d.st.interval || 10, liveOn = d.st.ping != null;
+			var kb = function(o, div) { var r = {}; for (var k in (o || {})) r[k] = o[k] / div / 1024; return r; };
+			return useLive
+				? d.live.map(function(p) { return { ts: p[0], ping: p[1], lossPct: liveOn && p[1] == null ? 100 : 0, state: p[2], gw: p[3], dev: kb(p[4], 1) }; })
+				: d.hist.map(function(p) { return { ts: p[0], ping: p[2], lossPct: p[3], state: p[4], gw: p[5], dev: kb(p[6], iv) }; });
+		};
+		merge(res[0], res[1], res[2]);
+
+		// skeleton: built once, parts refreshed every second
+		var root = E('div', { 'class': 'nm' + (kiosk ? ' nm-mon' : '') });
+		var bar = E('div', { 'class': kiosk ? 'nm-mon-bar' : '' }), tiles = E('div', { 'class': 'nm-tiles' });
+		var rangeBox = E('div', { 'class': 'nm-seg', 'style': 'margin:0' }), live = E('span', { 'class': 'nm-live' });
+		var cells = {};
+		[ 'ping', 'udp', 'wans' ].forEach(function(k) {
+			var c = { head: E('div', { 'class': 'nm-bh' }), legend: E('div'), plot: E('div', { 'class': 'nm-plot' }) };
+			c.node = E('div', { 'class': kiosk ? 'nm-cell nm-cell-' + k : 'nm-block' }, [ c.head, c.legend, c.plot ]);
+			cells[k] = c;
+		});
+		var cellNodes = [ cells.ping.node, cells.udp.node, cells.wans.node ];
+		if (kiosk) {
+			document.body.classList.add('nm-kiosk');
+			root.appendChild(bar);
+			root.appendChild(tiles);
+			root.appendChild(E('div', { 'class': 'nm-mon-charts' }, cellNodes));
+		} else {
+			var full = E('a', { 'class': 'nm-btn', 'href': L.url('admin/services/netmode/monitor'), 'title': _('Full-screen view for a second monitor (F11 for a full browser window)') }, [ '⛶ ' + _('Monitor') ]);
+			root.appendChild(E('div', { 'class': 'nm-card' }, [ E('h3', {}, [ _('Network mode'), live ]), bar, tiles ]));
+			root.appendChild(E('div', { 'class': 'nm-card' }, [ E('h3', {}, [ _('Graphs'), E('span', { 'class': 'nm-seg', 'style': 'margin:0' }, [ rangeBox, full ]) ]) ].concat(cellNodes)));
+		}
+
+		var refresh = function() {
+			return nm.status().then(function(st) { merge(st); d.key = ''; drawBar(); drawTiles(); });
+		};
+
+		// status + controls: rebuilt only when the state behind the buttons changes (a rebuild every second would
+		// swallow clicks)
+		var drawBar = function() {
+			var st = d.st;
+			live.replaceChildren(E('i'), Date.now() - d.ok < 6000 ? _('live') : _('no data'));
+			live.className = 'nm-live' + (Date.now() - d.ok < 6000 ? '' : ' stale');
+			if (!st.running) {
+				d.key = '';
+				bar.replaceChildren(E('em', {}, [ _('netmode is not running (/etc/init.d/netmode start)') ]));
+				return;
+			}
+			var key = JSON.stringify([ st.mode, st.state, st.gw, st.gw_mode, st.wans, st.cands, st.move_flows, st.probe, st.target,
+				(st.devices || []).map(function(x) { return [ x.ip, x.name, x.playing ]; }) ]);
+			if (key == d.key) return;
+			d.key = key;
+			var c = nm.controls(st, refresh);
+			var playing = (st.devices || []).filter(function(x) { return x.playing; });
+			if (kiosk) {
+				bar.replaceChildren(nm.badge(st),
+					E('div', { 'class': 'nm-seg' }, [ E('span', { 'class': 'nm-label' }, [ _('Mode') ]) ].concat([].slice.call(c.modes.children))),
+					E('div', { 'class': 'nm-seg' }, [ E('span', { 'class': 'nm-label' }, [ _('Game WAN') ]) ].concat([].slice.call(c.gws.children))),
+					E('span', { 'class': 'grow' }),
+					E('span', { 'class': 'nm-note', 'title': SRC[st.target_src] || '' }, [ _('probe target %s').format(st.target) ]),
+					rangeBox, live,
+					E('a', { 'class': 'nm-x', 'href': L.url('admin/services/netmode/dashboard'), 'title': _('Back to the dashboard') }, [ '✕' ]));
+			} else {
+				bar.replaceChildren(E('div', { 'class': 'nm-head' }, [
+					E('div', {}, [ nm.badge(st), E('div', { 'class': 'nm-desc' }, [ nm.describe(st) ]),
+						E('div', { 'class': 'nm-desc' }, [ _('Mode %s').format(st.mode) + ' · ' +
+							(playing.length ? _('%s playing').format(playing.map(nm.devName).join(', ')) : _('nobody playing')) + ' · ' +
+							_('game WAN %s').format(st.gw_mode) ]) ]),
+					E('div', {}, [ E('div', { 'class': 'nm-label' }, [ _('Mode') ]), c.modes, E('div', { 'class': 'nm-label' }, [ _('Game WAN') ]), c.gws, c.note ])
+				]));
+			}
+		};
+
+		var drawTiles = function() {
+			var st = d.st;
+			if (!st.running) { tiles.replaceChildren(); return; }
+			var lv = rows(true), now = d.liveLast || st.ts;
+			var last = lv.length && now - lv[lv.length - 1].ts <= 3 ? lv[lv.length - 1] : null;
+			var s = stats(lv.filter(function(r) { return r.ts > now - 60; })), p = st.ping;
+			var r3 = lv.filter(function(r) { return r.ts > now - 3; });
+			var rate = function(ip) { return r3.length ? r3.reduce(function(a, r) { return a + (r.dev[ip] || 0); }, 0) / r3.length : null; };
+			var devs = st.devices || [], total = devs.reduce(function(a, x) { return a + (rate(x.ip) || 0); }, 0);
+			var pingNow = last && p != null ? (last.ping != null ? String(Math.round(last.ping)) : _('lost')) : (p && p.avg != null ? String(Math.round(p.avg)) : '—');
+			var match = st.match
+				? tile(_('Match'), nm.dur(now - st.match.start), '', [ _('since %s · on %s').format(nm.hhmm(st.match.start), st.gw) ])
+				: tile(_('Match'), '—', '', [ _('no match running · '), E('a', { 'href': L.url('admin/services/netmode/matches') }, [ _('reports') ]) ]);
+			var devTile = tile(_('Gaming devices'), kbs(total), 'KB/s', devs.length ? devs.map(function(x) {
+				return E('div', {}, [ nm.devName(x) + ': ' + kbs(rate(x.ip)) + ' KB/s' + (x.playing ? ' · ' + _('playing') : '') ]);
+			}) : [ E('a', { 'href': L.url('admin/services/netmode/settings') }, [ _('pick your gaming devices in Settings') ]) ]);
+			if (kiosk)
+				tiles.replaceChildren(
+					tile(_('Ping now'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms', [ _('via %s · 1 ping per second').format(st.gw) ]),
+					tile(_('Avg · 60 s'), s.avg != null ? String(Math.round(s.avg)) : '—', s.avg != null ? 'ms' : '', [ _('10 s median on the graph') ]),
+					tile(_('Jitter · loss · 60 s'), s.jitter != null ? s.jitter.toFixed(1) : '—', 'ms', [ _('loss %s %%').format(s.loss != null ? s.loss.toFixed(1) : '—') ]),
+					devTile, match);
+			else
+				tiles.replaceChildren(
+					tile(_('Game WAN ping'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms',
+						[ s.avg != null ? _('last 60 s: avg %d ms · jitter %.1f ms · loss %d %%').format(Math.round(s.avg), s.jitter || 0, Math.round(s.loss)) : '',
+						  E('div', {}, [ _('via %s to %s').format(st.gw, st.target) ]) ]),
+					devTile, match,
+					tile(_('Probe target'), st.target, '', [ (SRC[st.target_src] || st.target_src) + (st.target_src != 'server' && st.server && st.server != '-' ? ' · ' + _('game server %s').format(st.server) : '') ]));
+		};
+
+		var drawCharts = function() {
+			var st = d.st, useLive = vs.range <= LIVE_KEEP, all = rows(useLive);
+			var t1 = useLive ? (d.liveLast || st.ts) : (d.histLast || st.ts), t0 = t1 - vs.range;
+			var rs = all.filter(function(r) { return r.ts > t0; });
+			var probes = d.probes.filter(function(p) { return p[0] > t0 - 60; });
+			var devs = st.game_ips || [], wans = st.wans || [], iv = st.interval || 10, names = {};
+			(st.devices || []).forEach(function(x) { names[x.ip] = nm.devName(x); });
+
+			rangeBox.replaceChildren.apply(rangeBox, RANGES.map(function(r) {
+				var b = E('button', { 'type': 'button', 'class': 'nm-btn' + (r[0] == vs.range ? ' on' : '') }, [ r[1] ]);
+				b.addEventListener('click', function() { vs.range = r[0]; vs.hover = null; drawCharts(); });
+				return b;
+			}));
+
+			var size = function(c, h) {
+				return { W: Math.max(240, c.plot.clientWidth || (root.clientWidth || 940) - 34), H: kiosk ? Math.max(100, c.plot.clientHeight) : h };
+			};
+			var head = function(c, title, sub, nowVal, nowUnit, nowSub) {
+				c.head.replaceChildren(
+					E('div', {}, [ E('div', { 'class': 't' }, [ title ]), E('div', { 'class': 's' }, [ sub ]) ]),
+					E('div', { 'class': 'now' }, [ E('b', {}, [ nowVal ]), nowUnit ? E('small', {}, [ nowUnit ]) : '', nowSub ? E('div', {}, [ nowSub ]) : '' ]));
+			};
+			var empty = function(c, text) { c.legend.replaceChildren(); c.plot.replaceChildren(E('em', { 'class': 'nm-note' }, [ text ])); };
+
+			if (rs.length < 2) {
+				[ 'ping', 'udp', 'wans' ].forEach(function(k) { cells[k].head.replaceChildren(); empty(cells[k], useLive ? _('Collecting data… (one point per second)') : _('Collecting data… (one point every %d s)').format(iv)); });
+				return;
+			}
+
+			var step = useLive ? 1 : iv, bands = [], marks = [], start = null;
+			rs.forEach(function(r, i) {
+				var next = rs[i + 1];
+				if (r.state == 'game' && start == null) start = r.ts - step;
+				if (r.state == 'game' && (!next || next.state != 'game')) { bands.push([ start, r.ts ]); start = null; }
+				if (i > 0 && r.gw != rs[i - 1].gw) marks.push({ ts: r.ts, label: '→ ' + r.gw });
+			});
+			var loss = rs.filter(function(r) { return r.lossPct > 0; }).map(function(r) { return r.ts; });
+			var frame = function(sz) { return { L: 52, R: 16, t0: t0, t1: t1 }; };
+			var charts = [];
+
+			// game WAN ping: live = faint 1 s pings under a 10 s rolling median
+			var med = {};
+			if (useLive) rs.forEach(function(r, i) {
+				var w = [];
+				for (var k = i; k >= 0 && rs[k].ts > r.ts - 10; k--) if (rs[k].ping != null) w.push(rs[k].ping);
+				w.sort(function(a, b) { return a - b; });
+				med[r.ts] = w.length >= 3 ? (w.length % 2 ? w[(w.length - 1) / 2] : (w[w.length / 2 - 1] + w[w.length / 2]) / 2) : null;
+			});
+			var s = stats(rs), lastPing = null;
+			for (var i = rs.length - 1; i >= 0 && lastPing == null; i--) if (rs[i].ping != null) lastPing = rs[i].ping;
+			var sz = size(cells.ping, 220);
+			var c1 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'ms', robust: true, minSpan: 20, bands: bands, marks: marks, loss: loss,
+				series: useLive
+					? [ { label: _('ping'), color: nm.color(0), width: 1, opacity: 0.4, tol: 1.5, pts: rs.map(function(r) { return [ r.ts, r.ping ]; }) },
+					    { label: _('10 s median'), color: nm.color(0), area: true, tol: 1.5, pts: rs.map(function(r) { return [ r.ts, med[r.ts] ]; }) } ]
+					: [ { label: _('ping'), color: nm.color(0), area: true, tol: step * 1.5, pts: rs.map(function(r) { return [ r.ts, r.ping ]; }) } ] });
+			var leg = useLive
+				? [ [ nm.lineKey(nm.color(0)), _('10 s median') ], [ S('svg', { 'width': 16, 'height': 10 }, [ S('line', { 'x1': 1, 'y1': 5, 'x2': 15, 'y2': 5,
+					'stroke': nm.color(0), 'stroke-width': 1, 'stroke-opacity': 0.5 }) ]), _('each ping') ] ]
+				: [ [ nm.lineKey(nm.color(0)), _('average of 5 pings every %d s').format(iv) ] ];
+			if (bands.length) leg.push([ nm.bandKey(), _('game mode') ]);
+			if (marks.length) leg.push([ nm.markKey(), _('game WAN switch') ]);
+			if (loss.length) leg.push([ nm.lossKey(), _('packet loss') ]);
+			if (c1.clipped) leg.push([ nm.spikeKey(), _('spike above the scale') ]);
+			head(cells.ping, _('Game WAN ping'), _('ms · through the game WAN to the probe target'), lastPing != null ? String(Math.round(lastPing)) : '—', 'ms',
+				s.avg != null ? _('avg %d · jitter %.1f · loss %.1f %%').format(Math.round(s.avg), s.jitter || 0, s.loss) : '');
+			cells.ping.legend.replaceChildren(nm.legend(leg));
+			cells.ping.plot.replaceChildren(c1.svg);
+			charts.push(c1);
+
+			// gaming devices' UDP upload
+			var lastDev = rs[rs.length - 1].dev, totalNow = devs.reduce(function(a, ip) { return a + (lastDev[ip] || 0); }, 0);
+			head(cells.udp, _('Gaming devices UDP upload'), _('KB/s · DNS, NTP, QUIC and LAN traffic not counted'), kbs(totalNow), 'KB/s');
+			cells.udp.legend.replaceChildren(nm.legend(devs.map(function(ip, i) { return [ nm.lineKey(nm.color(i)), names[ip] || ip, kbs(lastDev[ip]) + ' KB/s' ]; })
+				.concat([ [ nm.lineKey('currentColor', '5 4'), _('game mode threshold') ] ])));
+			sz = size(cells.udp, 160);
+			var c2 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'KB/s', zero: true, minSpan: 1, bands: bands,
+				thresh: { v: (st.thresh || 0) / iv / 1024, label: _('game mode threshold') },
+				series: devs.map(function(ip, i) {
+					return { label: names[ip] || ip, color: nm.color(i), area: devs.length == 1, tol: step * 1.5,
+						pts: rs.map(function(r) { return [ r.ts, r.dev[ip] != null ? r.dev[ip] : null ]; }) };
+				}) });
+			cells.udp.plot.replaceChildren(c2.svg);
+			charts.push(c2);
+
+			// WAN pings (probe rounds)
+			if (probes.length) {
+				var lastProbe = probes[probes.length - 1][1];
+				head(cells.wans, _('WAN pings'), _('ms · 20th percentile of 10 pings per WAN, every probe round'), '', '');
+				cells.wans.legend.replaceChildren(nm.legend(wans.map(function(w, i) {
+					return [ nm.lineKey(nm.color(i)), w + (w == st.gw ? ' (' + _('game WAN') + ')' : ''), lastProbe[w] != null ? lastProbe[w] + ' ms' : _('no reply') ];
+				})));
+				sz = size(cells.wans, 200);
+				var c3 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'ms', robust: true, minSpan: 20, bands: bands, marks: marks,
+					series: wans.map(function(w, i) {
+						return { label: w, color: nm.color(i), markers: true, tol: 45, pts: probes.map(function(p) { return [ p[0], p[1][w] != null ? p[1][w] : null ]; }) };
+					}) });
+				cells.wans.plot.replaceChildren(c3.svg);
+				charts.push(c3);
+			} else {
+				head(cells.wans, _('WAN pings'), _('ms · every probe round'), '', '');
+				empty(cells.wans, _('Waiting for the first probe round…'));
+			}
+
+			var byTs = {};
+			rs.forEach(function(r) { byTs[r.ts] = r; });
+			nm.hoverGroup(charts, rs.map(function(r) { return r.ts; }), function(ts) {
+				var r = byTs[ts], out = [ E('div', { 'class': 'm' }, [ nm.hhmm(ts, true) + ' · ' + (r.state == 'game' ? _('game mode') : _('all WANs')) + ' · ' + _('game WAN %s').format(r.gw) ]) ];
+				out.push(nm.tipRow(r.ping != null ? r.ping.toFixed(1) + ' ms' : _('no reply'), _('ping'), nm.color(0)));
+				if (useLive && med[ts] != null) out.push(nm.tipRow(Math.round(med[ts]) + ' ms', _('10 s median'), nm.color(0)));
+				if (!useLive) out.push(nm.tipRow(r.lossPct != null ? r.lossPct + ' %' : '—', _('packet loss')));
+				devs.forEach(function(ip, i) { out.push(nm.tipRow(kbs(r.dev[ip]) + ' KB/s', names[ip] || ip, nm.color(i))); });
+				var pr = null;
+				probes.forEach(function(p) { if (Math.abs(p[0] - ts) <= 90 && (!pr || Math.abs(p[0] - ts) < Math.abs(pr[0] - ts))) pr = p; });
+				if (pr) wans.forEach(function(w, i) { out.push(nm.tipRow(pr[1][w] != null ? pr[1][w] + ' ms' : _('no reply'), w, nm.color(i))); });
+				return out;
+			}, vs);
+		};
+
+		var tick = function() {
+			d.n++;
+			return Promise.all([ nm.status(), nm.live(d.liveLast), d.n % 5 == 0 ? nm.history(d.histLast) : null ]).then(function(r) {
+				if (r[0] && r[0].ts) d.ok = Date.now();
+				merge(r[0], r[2], r[1]);
+				drawBar(); drawTiles(); drawCharts();
+			});
+		};
+
+		drawBar(); drawTiles();
+		poll.add(tick, 1);
+		var t = null;
+		window.addEventListener('resize', function() { clearTimeout(t); t = setTimeout(drawCharts, 120); });
+		requestAnimationFrame(function() { root.style.setProperty('--nm-ring', surfaceOf(root)); drawCharts(); });
+		return root;
 	},
 
 	/* One row per group, a dot per match at its average ping, a tick at the median.
