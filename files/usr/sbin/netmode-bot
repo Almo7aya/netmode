@@ -1,0 +1,262 @@
+#!/usr/bin/ucode -S
+// netmode-bot — the Telegram side of netmode: answers commands and button presses in the configured chat
+// (telegram_chat; optionally only from the user ids in telegram_user). Event messages come from netmode-daemon
+// through /usr/libexec/netmode/notify; the buttons on them land here. Long polling: one request per ~50 s idle.
+'use strict';
+
+import { popen, readfile, writefile, unlink } from 'fs';
+import { cursor } from 'uci';
+import { connect } from 'ubus';
+
+const RUN = '/var/run/netmode';
+const REQ = RUN + '/bot.req';
+const OFFSET = RUN + '/bot.offset';
+const HELP = join('\n', [
+	'🎮 netmode bot',
+	'/status — mode, game WAN and ping, with buttons',
+	'/mode auto|game|all — set the mode',
+	'/wan <name>|auto — switch the game WAN now, or let netmode pick',
+	'/pings — the latest ping of every WAN',
+	'/matches [n] — the last match reports',
+	'/mute [minutes] — pause notifications (default 60)',
+	'/unmute — resume notifications',
+	'',
+	'Switching the game WAN during a match moves it: the game freezes for about a second.'
+]);
+const COMMANDS = [
+	{ command: 'status', description: 'Mode, game WAN and ping, with buttons' },
+	{ command: 'mode', description: 'auto | game | all' },
+	{ command: 'wan', description: '<name> | auto: switch the game WAN now' },
+	{ command: 'pings', description: 'The latest ping of every WAN' },
+	{ command: 'matches', description: 'The last match reports' },
+	{ command: 'mute', description: 'Pause notifications (minutes, default 60)' },
+	{ command: 'unmute', description: 'Resume notifications' },
+	{ command: 'help', description: 'What the bot can do' }
+];
+
+let bus = connect();
+let token = '', chat = '', users = [], loaded = 0, started = time();
+
+function load() {
+	let m = cursor().get_all('netmode', 'main') || {};
+	token = m.telegram_token || '';
+	chat = '' + (m.telegram_chat || '');
+	users = m.telegram_user ? (type(m.telegram_user) == 'array' ? m.telegram_user : [ m.telegram_user ]) : [];
+	loaded = time();
+	return m.telegram == '1' && match(token, /^[0-9]+:[A-Za-z0-9_-]+$/) && chat != '';
+}
+
+function api(method, params, timeout) {
+	writefile(REQ, sprintf('%J', params));
+	let p = popen(sprintf("curl -sS -m %d -H 'Content-Type: application/json' --data-binary @%s 'https://api.telegram.org/bot%s/%s' 2>/dev/null",
+		timeout || 15, REQ, token, method), 'r');
+	if (!p) return null;
+	let out = p.read('all');
+	p.close();
+	try { return json(out); } catch (e) { return null; }
+}
+
+function answer(q, text) { api('answerCallbackQuery', { callback_query_id: q.id, text: text || '' }); }
+
+function send(text, kb) {
+	let p = { chat_id: chat, text: text, disable_web_page_preview: true };
+	if (kb) p.reply_markup = kb;
+	return api('sendMessage', p);
+}
+
+function nm(method, args) { return bus.call('netmode', method, args || {}); }
+
+function allowed(chatId, userId) {
+	if ('' + chatId != chat) return false;
+	return !length(users) || index(users, '' + userId) >= 0;
+}
+
+function pad(n) { return n < 10 ? '0' + n : '' + n; }
+function hhmm(ts) { let t = localtime(ts); return pad(t.hour) + ':' + pad(t.min); }
+function dur(s) {
+	s = int(s);
+	return s < 3600 ? int(s / 60) + ':' + pad(s % 60) : int(s / 3600) + ':' + pad(int(s / 60) % 60) + ':' + pad(s % 60);
+}
+function devName(d) { return d.name || d.ip; }
+
+function statusText(s) {
+	if (!s || !s.running) return '⏹ netmode is not running';
+	let l = [];
+	push(l, s.state == 'game' ? '🎮 Game mode · game WAN ' + s.gw : '🚀 All WANs · game WAN ' + s.gw + ' ready');
+	push(l, 'Mode ' + s.mode + ' · game WAN ' + (s.gw_mode == 'auto' ? 'auto' : 'locked'));
+	let pl = filter(s.devices || [], (d) => d.playing);
+	push(l, length(pl) ? 'Playing: ' + join(', ', map(pl, devName)) : 'Nobody playing');
+	if (s.ping)
+		push(l, s.ping.avg != null ? sprintf('Ping %.0f ms · jitter %.1f ms · loss %d %%', s.ping.avg, s.ping.jitter, s.ping.loss) : 'Ping: no reply from ' + s.target);
+	if (s.match) push(l, 'Match: ' + dur(s.ts - s.match.start) + ' (since ' + hhmm(s.match.start) + ')');
+	push(l, 'WAN pings: ' + join(' · ', map(s.probe || [], (p) => p.wan + ' ' + (p.p20 != null ? p.p20 : '–'))));
+	return join('\n', l);
+}
+
+function statusKb(s) {
+	if (!s || !s.running) return null;
+	let tick = (on, t) => (on ? '✓ ' : '') + t;
+	let rows = [ [
+		{ text: tick(s.mode == 'auto', 'Auto'), callback_data: 'mode:auto' },
+		{ text: tick(s.mode == 'game', '🎮 Game'), callback_data: 'mode:game' },
+		{ text: tick(s.mode == 'all', '🚀 All WANs'), callback_data: 'mode:all' }
+	] ];
+	let pr = {}, probes = s.probe || [], wans = s.wans || [], row = [], now = time();
+	for (let i = 0; i < length(probes); i++) pr[probes[i].wan] = probes[i];
+	for (let i = 0; i < length(wans); i++) {
+		let w = wans[i], p = pr[w];
+		push(row, { text: (w == s.gw ? '● ' : '') + w + (p ? ' ' + (p.p20 != null ? p.p20 + ' ms' : '–') : ''), callback_data: 'gw:' + w + ':' + now });
+		if (length(row) == 3) { push(rows, row); row = []; }
+	}
+	push(row, { text: tick(s.gw_mode == 'auto', 'Auto WAN'), callback_data: 'gwauto' });
+	push(rows, row);
+	push(rows, [ { text: '🔄 Refresh', callback_data: 'refresh' } ]);
+	return { inline_keyboard: rows };
+}
+
+function pingsText(s) {
+	if (!s || !s.running) return '⏹ netmode is not running';
+	let l = [ 'WAN pings to ' + s.target + ' (20th percentile of 10):' ], probes = s.probe || [];
+	for (let i = 0; i < length(probes); i++) {
+		let p = probes[i];
+		push(l, (p.wan == s.gw ? '● ' : '○ ') + p.wan + (p.p20 != null ? sprintf(': %d ms (avg %d, loss %d %%)', p.p20, p.avg, p.loss) : ': no reply'));
+	}
+	return join('\n', l);
+}
+
+function matchesText(n) {
+	let r = nm('matches', { limit: n }), ms = r ? r.matches : [];
+	if (!length(ms)) return 'No matches recorded yet.';
+	let l = [ '🏁 Last matches' ];
+	for (let i = 0; i < length(ms); i++) {
+		let m = ms[i], t = localtime(m.start);
+		push(l, sprintf('%s/%s %s · %s · %d min · %s · %s', pad(t.mday), pad(t.mon), hhmm(m.start),
+			(m.name && m.name != '-') ? m.name : (m.device || '?'), int(m.dur / 60 + 0.5), replace(m.gw, />/g, '→'),
+			m.ping != null ? sprintf('%.0f ms, jitter %.1f, loss %.1f %%', m.ping, m.jitter, m.loss) : 'no ping'));
+	}
+	return join('\n', l);
+}
+
+// wait (up to 4 s) for the daemon to apply a change
+function waitFor(ok) {
+	let s;
+	for (let i = 0; i < 8; i++) {
+		sleep(500);
+		s = nm('status');
+		if (s && ok(s)) break;
+	}
+	return s;
+}
+
+function setMode(m) {
+	nm('set', { mode: m, by: 'Telegram' });
+	return waitFor((s) => s.mode == m);
+}
+
+function setWan(w) {
+	if (w == 'auto') {
+		nm('set', { gw: 'auto', by: 'Telegram' });
+		return waitFor((s) => s.gw_mode == 'auto');
+	}
+	nm('set', { gw: w, now: true, by: 'Telegram' });
+	return waitFor((s) => s.gw == w);
+}
+
+function onCallback(q) {
+	let msg = q.message || {}, c = msg.chat || {}, from = q.from || {};
+	if (!allowed(c.id, from.id)) return answer(q, 'Not allowed here');
+	let a = split(q.data || '', ':'), act = a[0], arg = a[1], ts = int(a[2] || 0), s;
+	if ((act == 'sw' || act == 'gw' || act == 'keep') && ts && time() - ts > 600)
+		return answer(q, 'This button has expired: send /status');
+
+	if (act == 'mode') { answer(q, 'Mode: ' + arg); s = setMode(arg); }
+	else if (act == 'gw' || act == 'sw') { answer(q, 'Switching the game WAN to ' + arg + '…'); s = setWan(arg); }
+	else if (act == 'gwauto') { answer(q, 'Game WAN: auto'); s = setWan('auto'); }
+	else if (act == 'keep') { writefile(RUN + '/snooze_until', '' + (time() + 900)); answer(q, 'Staying on ' + arg); s = nm('status'); }
+	else { answer(q); s = nm('status'); }
+
+	if (act == 'sw' || act == 'keep') {
+		// a suggestion or an alert: keep its text, replace the buttons with what happened
+		let out = act == 'keep' ? '👍 Kept ' + arg + ': no more suggestions for 15 min.'
+			: (s && s.gw == arg ? '✅ Switched to ' + arg + ' at ' + hhmm(time()) + '.' : '⚠️ Still on ' + (s ? s.gw : '?') + ': send /status.');
+		api('editMessageText', { chat_id: c.id, message_id: msg.message_id, text: (msg.text || '') + '\n\n' + out });
+	}
+	else
+		api('editMessageText', { chat_id: c.id, message_id: msg.message_id, text: statusText(s), reply_markup: statusKb(s) });
+}
+
+function onMessage(m) {
+	let text = trim(m.text || '');
+	if (substr(text, 0, 1) != '/') return;
+	if (!allowed((m.chat || {}).id, (m.from || {}).id)) return;
+	if (m.date && m.date < started - 60) return;  // queued while the bot was down
+	let a = split(text, /\s+/), cmd = lc(replace(a[0], /@.*$/, '')), arg = a[1] ? lc(a[1]) : null, s, n;
+
+	if (cmd == '/status') {
+		s = nm('status'); send(statusText(s), statusKb(s));
+	}
+	else if (cmd == '/mode') {
+		if (index([ 'auto', 'game', 'all' ], arg) < 0) { s = nm('status'); send('Mode is ' + (s ? s.mode : '?') + ': /mode auto|game|all', statusKb(s)); }
+		else { s = setMode(arg); send(statusText(s), statusKb(s)); }
+	}
+	else if (cmd == '/wan' || cmd == '/gw') {
+		s = nm('status') || {};
+		if (!arg || (arg != 'auto' && index(s.wans || [], arg) < 0)) send('Game WAN is ' + s.gw + ': /wan ' + join('|', s.wans || []) + '|auto', statusKb(s));
+		else { s = setWan(arg); send(statusText(s), statusKb(s)); }
+	}
+	else if (cmd == '/pings') {
+		send(pingsText(nm('status')));
+	}
+	else if (cmd == '/matches') {
+		n = int(arg || 5); if (!(n > 0) || n > 30) n = 5;
+		send(matchesText(n));
+	}
+	else if (cmd == '/mute') {
+		n = int(arg || 60); if (!(n > 0)) n = 60;
+		writefile(RUN + '/mute_until', '' + (time() + n * 60));
+		send('🔕 Notifications muted for ' + n + ' min (/unmute to resume).');
+	}
+	else if (cmd == '/unmute') {
+		unlink(RUN + '/mute_until');
+		send('🔔 Notifications are on.');
+	}
+	else
+		send(HELP);
+}
+
+if (!load()) {
+	warn('netmode-bot: Telegram is off or not configured\n');
+	exit(0);
+}
+// netmode-bot --status: post the status message (with its buttons) once and exit
+if (ARGV[0] == '--status') {
+	let s = nm('status');
+	let r = send(statusText(s), statusKb(s));
+	print(r && r.ok ? 'sent\n' : 'not sent: ' + (r ? r.description : 'no reply') + '\n');
+	exit(r && r.ok ? 0 : 1);
+}
+api('setMyCommands', { commands: COMMANDS });
+let offset = int(trim(readfile(OFFSET) || '0')) || 0;
+
+while (true) {
+	let r = api('getUpdates', { offset: offset, timeout: 50, allowed_updates: [ 'message', 'callback_query' ] }, 65);
+	if (!r || !r.ok) {
+		if (r && r.description) warn('netmode-bot: ' + r.description + '\n');
+		sleep(10000);
+	}
+	else {
+		for (let i = 0; i < length(r.result); i++) {
+			let u = r.result[i];
+			offset = u.update_id + 1;
+			try {
+				if (u.callback_query) onCallback(u.callback_query);
+				else if (u.message) onMessage(u.message);
+			}
+			catch (e) {
+				warn('netmode-bot: ' + e + '\n');
+			}
+		}
+		writefile(OFFSET, '' + offset);
+	}
+	if (time() - loaded > 60 && !load()) exit(0);
+}

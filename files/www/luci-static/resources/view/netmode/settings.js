@@ -147,6 +147,14 @@ return view.extend({
 		o.datatype = 'range(1,60)';
 		o.placeholder = '3';
 
+		o = s.taboption('select', form.ListValue, 'match_switch', _('During a match'),
+			_('When another candidate beats the game WAN by the margin for that many probe rounds while someone plays. ' +
+			  'Switching moves the running match (the game freezes for about a second).'));
+		o.value('ask', _('Ask on Telegram (a message with a Switch button)'));
+		o.value('auto', _('Switch automatically (auto game WAN only; asks when it is locked)'));
+		o.value('off', _('Do nothing until the match ends'));
+		o.default = 'ask';
+
 		o = s.taboption('select', form.Value, 'default_target', _('Default probe target'),
 			_('Pinged when neither the game server nor a router in front of it answers ping.'));
 		o.datatype = 'ip4addr("nomask")';
@@ -166,8 +174,10 @@ return view.extend({
 		o.datatype = 'range(1,10000)';
 		o.placeholder = '200';
 
-		o = s.taboption('notify', form.Flag, 'telegram', _('Telegram notifications'),
-			_('Messages from a Telegram bot: create one with @BotFather, add it to your chat (or start a chat with it) and enter its token and the chat id.'));
+		o = s.taboption('notify', form.Flag, 'telegram', _('Telegram bot'),
+			_('Messages and controls through a Telegram bot: create one with @BotFather, add it to your chat (or start a chat ' +
+			  'with it) and enter its token and the chat id. In the chat: /status (with buttons), /mode, /wan, /pings, ' +
+			  '/matches, /mute, /unmute, /help.'));
 		o.rmempty = false;
 
 		o = s.taboption('notify', form.Value, 'telegram_token', _('Bot token'));
@@ -183,13 +193,18 @@ return view.extend({
 			return !value || /^(-?[0-9]+|@[A-Za-z0-9_]{5,})$/.test(value) ? true : _('A number (negative for groups) or @channelname');
 		};
 
+		o = s.taboption('notify', form.DynamicList, 'telegram_user', _('Allowed users'),
+			_('Telegram user ids that may use the commands and buttons. Empty: anyone in the chat.'));
+		o.datatype = 'uinteger';
+
 		o = s.taboption('notify', form.MultiValue, 'notify', _('Send'));
 		o.value('mode', _('Game mode on / off'));
 		o.value('gw', _('Game WAN changes'));
 		o.value('match', _('A report after each match'));
 		o.value('alert', _('Lag alerts during a match, no replies through the game WAN'));
+		o.value('suggest', _('A faster WAN during a match (with a Switch button)'));
 		o.value('start', _('netmode started (router boot, update)'));
-		o.default = 'mode gw match alert';
+		o.default = 'mode gw match alert suggest';
 
 		o = s.taboption('notify', form.Value, 'alert_ping', _('Lag alert: ping (ms)'),
 			_('Alert when the game WAN\'s ping stays at or above this during a match…'));

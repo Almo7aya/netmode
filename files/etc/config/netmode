@@ -35,12 +35,19 @@ config netmode 'main'
 	option telegram '0'
 	# option telegram_token ''
 	# option telegram_chat ''
+	# only these Telegram user ids may use the bot's commands and buttons (empty: anyone in the chat)
+	# list telegram_user ''
 	# events: mode (game mode on/off), gw (game WAN changes), match (report after each match),
-	# alert (lag during a match, no replies through the game WAN), start (netmode started)
+	# alert (lag during a match, no replies through the game WAN), suggest (a faster WAN during a match, with a
+	# button to switch), start (netmode started)
 	list notify 'mode'
 	list notify 'gw'
 	list notify 'match'
 	list notify 'alert'
+	list notify 'suggest'
+	# during a match, when another candidate is better by margin ms for rounds probe rounds:
+	# ask (Telegram message with a Switch button) | auto (switch, only with gw_mode auto) | off
+	option match_switch 'ask'
 	# lag alert: ping >= alert_ping ms or loss >= alert_loss % for alert_after intervals during a match,
 	# then quiet for alert_cooldown s
 	option alert_ping '200'

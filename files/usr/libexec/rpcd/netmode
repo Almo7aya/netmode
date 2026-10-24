@@ -7,7 +7,8 @@
 #   ubus call netmode live '{"since":0}'         1 s samples after "since" (last 15 min):
 #       points: [ts, ping|null, state, gw, {device_ip: udp_bytes}]
 #   ubus call netmode matches '{"limit":50}'    match reports, newest first
-#   ubus call netmode set '{"mode":"game"}' / '{"gw":"wan1"}'
+#   ubus call netmode set '{"mode":"game"}' / '{"gw":"wan1"}'    (gw locks the game WAN; "auto" frees it)
+#       '{"gw":"wan1","now":true}' switches now and keeps an auto game WAN auto; "by" names the source (default LuCI)
 #   ubus call netmode clear_matches
 #   ubus call netmode notify_test               send a Telegram test message with the saved settings
 RUN=/var/run/netmode
@@ -17,7 +18,7 @@ arg() { echo "$input" | jsonfilter -e "@.$1" 2>/dev/null; }
 
 case "$1" in
 list)
-	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str"},"clear_matches":{},"notify_test":{}}'
+	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str","now":true,"by":"str"},"clear_matches":{},"notify_test":{}}'
 	;;
 call)
 	read -r input
@@ -61,13 +62,21 @@ call)
 			awk 'BEGIN { printf "{\"matches\":[" } { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { print "]}" }'
 		;;
 	set)
-		mode=$(arg mode); gw=$(arg gw); err=""
+		mode=$(arg mode); gw=$(arg gw); now=$(arg now); by=$(arg by); err=""
+		case "$by" in Telegram) ;; *) by=LuCI ;; esac
+		echo "$by $(date +%s)" > $RUN/set_by
 		if [ -n "$mode" ]; then
 			case "$mode" in auto|game|all) /usr/sbin/netmode "$mode" >/dev/null ;; *) err="bad mode" ;; esac
 		fi
 		if [ -n "$gw" ]; then
 			case " auto $(jsonfilter -i $RUN/status.json -e '@.wans[*]' 2>/dev/null | tr '\n' ' ') " in
-				*" $gw "*) /usr/sbin/netmode gw "$gw" >/dev/null ;;
+				*" $gw "*)
+					if [ "$now" = true ] && [ "$gw" != auto ]; then
+						echo "$gw" > $RUN/gw_request
+						kill -USR1 "$(cat $RUN/pid 2>/dev/null)" 2>/dev/null
+					else
+						/usr/sbin/netmode gw "$gw" >/dev/null
+					fi ;;
 				*) err="bad gw" ;;
 			esac
 		fi

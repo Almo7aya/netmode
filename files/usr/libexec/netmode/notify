@@ -1,23 +1,35 @@
 #!/bin/sh
-# Send a netmode notification to Telegram. Settings in /etc/config/netmode: telegram (on/off), telegram_token
-# (from @BotFather), telegram_chat (user, group or channel id).
-#   notify "text"        send if notifications are on (netmode-daemon runs this in the background)
-#   notify -t ["text"]   test: send even if they are off and print the result (LuCI "Send test message")
+# Send a netmode message to Telegram. Settings in /etc/config/netmode: telegram (on/off), telegram_token
+# (from @BotFather), telegram_chat (user, group or channel id). Buttons are answered by netmode-bot.
+#   notify [-k keyboard_json] "text"   send if notifications are on and not muted (/mute in the bot)
+#   notify -t ["text"]                 test: send even if they are off and print the result
 . /lib/functions.sh
 config_load netmode
 config_get_bool ON main telegram 0
 config_get TOKEN main telegram_token ""
 config_get CHAT main telegram_chat ""
 
-test=0; [ "$1" = -t ] && { test=1; shift; }
+test=0; kb=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-t) test=1; shift ;;
+		-k) kb=$2; shift 2 ;;
+		*) break ;;
+	esac
+done
 text=${1:-"✅ netmode on $(uci -q get system.@system[0].hostname): Telegram notifications work."}
-[ $test = 1 ] || [ "$ON" = 1 ] || exit 0
+if [ $test = 0 ]; then
+	[ "$ON" = 1 ] || exit 0
+	mu=$(cat /var/run/netmode/mute_until 2>/dev/null)
+	[ -n "$mu" ] && [ "$mu" -gt "$(date +%s)" ] && exit 0
+fi
 if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
 	echo "set the bot token and the chat id first"; exit 1
 fi
 
+if [ -n "$kb" ]; then set -- --data-urlencode "reply_markup=$kb"; else set --; fi
 reply=$(curl -sS -m 15 -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-	-d "chat_id=$CHAT" -d "disable_web_page_preview=true" --data-urlencode "text=$text" 2>&1)
+	-d "chat_id=$CHAT" -d "disable_web_page_preview=true" --data-urlencode "text=$text" "$@" 2>&1)
 if echo "$reply" | grep -q '"ok":true'; then
 	[ $test = 1 ] && echo "sent"
 	exit 0

@@ -47,10 +47,10 @@ uci commit netmode
 	mkdir -p "/$(dirname "${f#./}")"
 	cp "files/${f#./}" "/${f#./}"
 done
-chmod 755 /etc/init.d/netmode /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler \
+chmod 755 /etc/init.d/netmode /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/sbin/netmode-bot \
 	/usr/libexec/netmode/mwan3-rules /usr/libexec/netmode/notify /usr/libexec/rpcd/netmode
 
-for f in /etc/netmode/ /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/lib/netmode/ \
+for f in /etc/netmode/ /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/sbin/netmode-bot /usr/lib/netmode/ \
 	/etc/init.d/netmode /usr/libexec/netmode/ \
 	/usr/libexec/rpcd/netmode /usr/share/rpcd/acl.d/luci-app-netmode.json /usr/share/luci/menu.d/luci-app-netmode.json \
 	/www/luci-static/resources/netmode/ /www/luci-static/resources/view/netmode/ \

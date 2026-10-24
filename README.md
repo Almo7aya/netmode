@@ -34,32 +34,57 @@ plentiful but each one's latency collapses as soon as somebody downloads on it.
   the ping over the match.
 - **Live data** — a sampler pings through the game WAN once per second and records each gaming device's upload
   (last 15 min); the daemon keeps 3 h of 10 s points and every probe round.
-- **Telegram notifications** (optional) — game mode on/off, game-WAN changes, a report after each match, and an
-  alert when the game WAN lags during a match (with the fastest other WAN to switch to).
+- **During a match** — auto mode never moves a running match on its own by default (moving it changes the public
+  IP: about a second of freeze). When another candidate beats the game WAN for 3 probe rounds, netmode asks on
+  Telegram with a **Switch** button (`match_switch ask`), switches by itself (`auto`), or waits for the match to
+  end (`off`).
+- **Telegram bot** (optional) — notifications (game mode on/off, game-WAN changes, a report after each match, lag
+  alerts and faster-WAN suggestions with a Switch button) and control from the chat: `/status` with buttons,
+  `/mode`, `/wan`, `/pings`, `/matches`, `/mute`.
 
-## Notifications
+## Telegram bot
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
 2. Start a chat with the bot (or add it to a group) and get the chat id (e.g. from
    `https://api.telegram.org/bot<token>/getUpdates` after sending it a message; group ids are negative).
-3. In **Services → Netmode → Settings → Notifications**, switch Telegram on, enter the token and chat id, choose the
-   events, save, and press **Send test message**.
+3. In **Services → Netmode → Settings → Notifications**, switch the bot on, enter the token and chat id, choose the
+   events (and, optionally, the user ids allowed to control it), save, and press **Send test message**.
 
-Example messages:
+The bot (`netmode-bot`, ucode) only answers in that chat. It long-polls Telegram, so it needs no open port and
+costs one small request every ~50 s while idle.
+
+| Command | |
+|---|---|
+| `/status` | mode, game WAN, ping, who's playing — with buttons for the mode and the game WAN |
+| `/mode auto\|game\|all` | set the mode |
+| `/wan <name>\|auto` | switch the game WAN now (an auto game WAN stays auto) or let netmode pick |
+| `/pings` | the latest ping of every WAN |
+| `/matches [n]` | the last match reports |
+| `/mute [minutes]`, `/unmute` | pause / resume notifications |
+
+Messages it sends:
 
 ```
 🎮 Game mode on — PC playing
 Game WAN: wan4 (94 ms). Everyone else is on the other WANs.
 
+💡 wan1 is faster than the game WAN wan4 right now: wan1 (92 ms) vs wan4 (140 ms) for the last 3 probe rounds.
+Switch the running match? The game freezes for about a second.
+[ Switch to wan1 (92 ms) ]  [ Keep wan4 ]
+
+⚠️ Lag on the game WAN wan4 during the match: 820 ms, 20 % loss (bad for the last 30 s).
+Fastest other WAN: wan2 (85 ms). Switch the running match? The game freezes for about a second.
+[ Switch to wan2 (85 ms) ]  [ Keep wan4 ]
+
 🏁 Match over — PC: 23 min on wan4
 Ping 96 ms avg (88–160), jitter 4.1 ms, loss 0.0 %, 2 spikes
 Data 48.2 MB
-
-⚠️ Lag on the game WAN wan4 during the match: 820 ms, 20 % loss (bad for the last 30 s).
-Fastest other WAN: wan2 (85 ms) — switch in LuCI → Services → Netmode.
 ```
 
-The token is stored only in `/etc/config/netmode` on the router.
+Buttons expire after 10 minutes; **Keep** silences suggestions for 15 minutes. Changes made from the chat are
+confirmed in place (the message is edited), changes made in LuCI or on the router are reported as such.
+`netmode-bot --status` posts the status message from the router (e.g. from cron). The token is stored only in
+`/etc/config/netmode` on the router.
 
 ## LuCI
 
@@ -133,9 +158,11 @@ netmode matches [n]         the last n match reports
 | `default_target` | `8.8.8.8` | probe target when nothing better answers ping |
 | `live_ping` | `1` | pings through the game WAN for the graphs (1 per second + 5 per interval) |
 | `min_match` / `keep_matches` | `60` / `200` | match reports |
-| `telegram` | `0` | Telegram notifications on / off |
+| `match_switch` | `ask` | during a match, when another candidate is clearly faster: `ask` (Telegram button), `auto` (switch; auto game WAN only), `off` |
+| `telegram` | `0` | Telegram bot on / off |
 | `telegram_token` / `telegram_chat` | — | bot token (from @BotFather) and chat id |
-| `notify` (list) | `mode gw match alert` | events to send: `mode`, `gw`, `match`, `alert`, `start` |
+| `telegram_user` (list) | — | user ids allowed to use commands and buttons (empty: anyone in the chat) |
+| `notify` (list) | `mode gw match alert suggest` | events to send: `mode`, `gw`, `match`, `alert`, `suggest`, `start` |
 | `alert_ping` / `alert_loss` / `alert_after` / `alert_cooldown` | `200` / `20` / `3` / `300` | lag alert: ping ms or loss % for N intervals during a match; at most one per cooldown s |
 
 ## API
@@ -148,7 +175,7 @@ rpcd object `netmode` (`ubus call netmode <method>`), used by the LuCI pages:
 | `live {"since": ts}` | 1 s points: `[ts, ping, state, gw, {ip: bytes}]` (last 15 min) |
 | `history {"since": ts}` | 10 s points `[ts, udp, ping, loss, state, gw, {ip: bytes}]` and probe rounds `[ts, {wan: p20}]` (last 3 h) |
 | `matches {"limit": n}` | match reports, newest first |
-| `set {"mode": …}` / `set {"gw": …}` | change the mode / the game WAN |
+| `set {"mode": …}` / `set {"gw": …}` | change the mode / lock the game WAN (`auto` frees it); `"now": true` switches without locking |
 | `clear_matches` | delete the match reports |
 | `notify_test` | send a Telegram test message with the saved settings |
 
@@ -157,9 +184,10 @@ rpcd object `netmode` (`ubus call netmode <method>`), used by the LuCI pages:
 ```
 files/                                         installed as-is on the router
 ├── etc/config/netmode                         default settings (kept on upgrade)
-├── etc/init.d/netmode                         procd service: daemon + sampler (START=18, before mwan3)
+├── etc/init.d/netmode                         procd service: daemon + sampler + bot (START=18, before mwan3)
 ├── usr/sbin/netmode-daemon                    detection, game-WAN choice, probes, match reports
 ├── usr/sbin/netmode-sampler                   1 s samples for the live graphs
+├── usr/sbin/netmode-bot                       Telegram commands and buttons (ucode)
 ├── usr/sbin/netmode                           command line
 ├── usr/lib/netmode/common.sh                  shared shell functions
 ├── usr/libexec/netmode/mwan3-rules            builds / removes the mwan3 policies and rules

@@ -38,23 +38,54 @@ load_conf() {
 	config_get_bool LIVE_PING main live_ping 1
 	config_get MIN_MATCH main min_match 60
 	config_get KEEP_MATCHES main keep_matches 200
+	config_get MATCH_SWITCH main match_switch ask
 	config_get_bool TELEGRAM main telegram 0
-	config_get NOTIFY main notify "mode gw match alert"
+	config_get NOTIFY main notify "mode gw match alert suggest"
 	config_get ALERT_PING main alert_ping 200
 	config_get ALERT_LOSS main alert_loss 20
 	config_get ALERT_AFTER main alert_after 3
 	config_get ALERT_COOLDOWN main alert_cooldown 300
 }
 
-# Telegram notification for event $1 (mode, gw, match, alert, start) when it is switched on; sent in the background
+# Telegram message for event $1 (mode, gw, match, alert, suggest, start) when it is switched on, with optional
+# buttons $3 (inline keyboard JSON, answered by netmode-bot); sent in the background
 notify() {
 	[ "$TELEGRAM" = 1 ] || return 0
 	case " $NOTIFY " in *" $1 "*) ;; *) return 0 ;; esac
-	/usr/libexec/netmode/notify "$2" >/dev/null 2>&1 &
+	if [ -n "$3" ]; then
+		/usr/libexec/netmode/notify -k "$3" "$2" >/dev/null 2>&1 &
+	else
+		/usr/libexec/netmode/notify "$2" >/dev/null 2>&1 &
+	fi
 }
 
 # " (94 ms)" from the last probe round for WAN $1 (empty when unknown)
 ping_of() { awk -v w="$1" '$1 == w { print " (" ($3 == 100 ? "no reply" : $2 " ms") ")" }' $RUN/probe 2>/dev/null; }
+
+# buttons "Switch to $1" / "Keep $2" (they expire after 10 min)
+kb_switch() {
+	printf '{"inline_keyboard":[[{"text":"Switch to %s%s","callback_data":"sw:%s:%s"},{"text":"Keep %s","callback_data":"keep:%s:%s"}]]}' \
+		"$1" "$(ping_of "$1")" "$1" "$now" "$2" "$2" "$now"
+}
+
+# during a match, another candidate has been better for rounds probe rounds: ask on Telegram (at most every
+# 10 min; "Keep" in the bot snoozes it for 15 min)
+suggest() {
+	[ $((now - last_suggest)) -ge 600 ] || return 0
+	sn=$(cat $RUN/snooze_until 2>/dev/null); [ -n "$sn" ] && [ "$sn" -gt "$now" ] && return 0
+	last_suggest=$now
+	notify suggest "💡 $best is faster than the game WAN $GW right now: $best$(ping_of "$best") vs $GW$(ping_of "$GW") for the last $ROUNDS probe rounds.
+Switch the running match? The game freezes for about a second." "$(kb_switch "$best" "$GW")"
+}
+
+# who asked for the change being applied: "LuCI" / "Telegram" written with a timestamp by rpcd or the bot
+source_of() {
+	src=""
+	if [ -f $RUN/set_by ]; then
+		read -r b bt < $RUN/set_by; rm -f $RUN/set_by
+		[ $((now - ${bt:-0})) -lt 20 ] && src=$b
+	fi
+}
 
 set_on()  { ipset -exist create "$1" hash:net; ipset -exist add "$1" 0.0.0.0/1; ipset -exist add "$1" 128.0.0.0/1; }
 set_off() { ipset -exist create "$1" hash:net; ipset flush "$1"; }
@@ -148,8 +179,9 @@ fallback_target() {
 	warned=$TARGET
 }
 
-# every probe_every s: 10 pings through every WAN in parallel; in gw_mode auto, count rounds where another
-# candidate beats the game WAN by margin ms (switching waits until nobody plays)
+# every probe_every s: 10 pings through every WAN in parallel. In gw_mode auto, count rounds where another
+# candidate beats the game WAN by margin ms (switching waits until nobody plays). During a match, the same test
+# against the game WAN's own score leads to match_switch: ask on Telegram, switch (auto game WAN only) or nothing.
 probe_round() {
 	last_probe=$now; pids=""
 	for w in $WANS; do
@@ -158,14 +190,15 @@ probe_round() {
 	for p in $pids; do  # a USR1 (apply now) interrupts wait: keep waiting until every probe is done
 		while kill -0 "$p" 2>/dev/null; do wait "$p"; done
 	done
-	: > $RUN/probe.new; best=""; bests=99999; cur_s=99999; alive=0; ph="$now"
+	: > $RUN/probe.new; best=""; bests=99999; cur_s=99999; gw_s=99999; alive=0; ph="$now"
 	for w in $WANS; do
 		set -- $(cat "$RUN/p.$w" 2>/dev/null); rm -f "$RUN/p.$w"
 		[ $# -ge 3 ] || set -- 9999 100 -
 		echo "$w $1 $2 $3" >> $RUN/probe.new
 		if [ "$2" -lt 100 ]; then alive=1; ph="$ph $w=$1"; else ph="$ph $w=-"; fi
-		case " $CANDS " in *" $w "*) ;; *) continue ;; esac
 		score=$(( $1 + $2 * 2 ))
+		[ "$w" = "$GW" ] && gw_s=$score
+		case " $CANDS " in *" $w "*) ;; *) continue ;; esac
 		[ "$score" -lt "$bests" ] && { bests=$score; best=$w; }
 		[ "$w" = "$GW" ] && cur_s=$score
 	done
@@ -180,31 +213,54 @@ probe_round() {
 		better=0
 	fi
 	if [ "$better" -ge "$ROUNDS" ] && [ "$playing" = 0 ]; then
-		newgw=$best; better=0; how="auto, $(tr '\n' ';' < $RUN/probe)"
+		newgw=$best; better=0; how=auto
+	fi
+
+	if [ "$playing" = 1 ] && [ -n "$best" ] && [ "$best" != "$GW" ] && [ $((gw_s - bests)) -ge "$MARGIN" ]; then
+		mbetter=$((mbetter + 1))
+	else
+		mbetter=0
+	fi
+	if [ "$mbetter" -ge "$ROUNDS" ]; then
+		mbetter=0
+		if [ "$MATCH_SWITCH" = auto ] && [ "$GW_MODE" = auto ]; then
+			newgw=$best; better=0; how="auto during the match"
+		elif [ "$MATCH_SWITCH" != off ]; then
+			suggest
+		fi
 	fi
 }
 
 switch() {  # apply $want and $newgw
 	[ "$want" = "$EFF" ] && [ "$newgw" = "$GW" ] && return
 	oldeff=$EFF; oldgw=$GW; EFF=$want; GW=$newgw; apply_sets
+	# a change made in Telegram is confirmed by the bot itself: no second message
+	source_of; by=""
+	case "$src" in LuCI) by=" (from LuCI)" ;; Telegram) by=tg ;; *) by=" (set on the router)" ;; esac
 	if [ "$EFF" != "$oldeff" ]; then
-		logger -t netmode "mode $oldeff -> $EFF (gaming devices UDP $UDP B/${INTERVAL}s)"
-		if [ "$EFF" = game ]; then
+		logger -t netmode "mode $oldeff -> $EFF (gaming devices UDP $UDP B/${INTERVAL}s${src:+, from $src})"
+		if [ "$by" = tg ]; then
+			:
+		elif [ "$EFF" = game ]; then
 			who=$(names_of $BUSY)
-			notify mode "🎮 Game mode on$([ "$MODE" = game ] && echo ' (set by hand)')${who:+ — $who playing}
+			notify mode "🎮 Game mode on$([ "$MODE" = game ] && echo "$by")${who:+ — $who playing}
 Game WAN: $GW$(ping_of "$GW"). Everyone else is on the other WANs."
 		else
-			why=""; [ "$MODE" = all ] && why=" (set by hand)"
+			why=""; [ "$MODE" = all ] && why=$by
 			[ "$MODE" = auto ] && [ "$last_game" -gt 0 ] && why=" — no game traffic for $HOLD s"
 			notify mode "🚀 Game mode off$why. Everyone shares every WAN again."
 		fi
 	fi
 	if [ "$GW" != "$oldgw" ]; then
-		echo "$GW" > $DATA/gw; better=0; n=0
+		echo "$GW" > $DATA/gw; better=0; mbetter=0; n=0
 		[ "$MOVE_FLOWS" = 1 ] && n=$(move_flows)
-		logger -t netmode "game WAN $oldgw -> $GW ($how; moved $n game flows)"
-		if [ "$how" = manual ]; then why="picked by hand"; else why="auto: $GW$(ping_of "$GW") beat $oldgw$(ping_of "$oldgw")"; fi
-		notify gw "🔀 Game WAN $oldgw → $GW ($why)$([ "$n" -gt 0 ] && echo " — the running match was moved")"
+		logger -t netmode "game WAN $oldgw -> $GW ($how${src:+, from $src}; moved $n game flows)"
+		case "$how" in
+			auto*) why="$how: $GW$(ping_of "$GW") beat $oldgw$(ping_of "$oldgw")" ;;
+			*) why=${by# (}; why=${why%)} ;;
+		esac
+		[ "$by" = tg ] && [ "$how" != auto ] && [ "$how" != "auto during the match" ] ||
+			notify gw "🔀 Game WAN $oldgw → $GW ($why)$([ "$n" -gt 0 ] && echo " — the running match was moved")"
 	fi
 }
 
@@ -323,7 +379,7 @@ case "$MODE" in game) EFF=game ;; all) EFF=all ;; esac
 apply_sets
 load_names
 logger -t netmode "start: mode $MODE ($EFF), game WAN $GW, devices $GAME_IPS, probe target $TARGET ($TARGET_SRC)"
-BUSY=""; lag=0; last_alert=0
+BUSY=""; lag=0; last_alert=0; mbetter=0; last_suggest=0; src=""
 notify start "▶️ netmode started on $(uci -q get system.@system[0].hostname): mode $MODE, game WAN $GW."
 
 : > $RUN/flows.prev; udp_delta "$GAME_IPS" $RUN/flows.prev > /dev/null
@@ -359,6 +415,14 @@ while true; do
 	case "$MODE" in game) want=game ;; all) want=all ;; *) [ $playing = 1 ] && want=game || want=all ;; esac
 	newgw=$GW; how=manual
 	case " $WANS " in *" $GW_MODE "*) newgw=$GW_MODE ;; esac
+	# "switch now" (Telegram buttons, /wan): the auto game WAN stays auto, a locked one moves its lock
+	if [ -f $RUN/gw_request ]; then
+		read -r rq < $RUN/gw_request; rm -f $RUN/gw_request
+		case " $WANS " in *" $rq "*)
+			newgw=$rq; how=request
+			if [ "$GW_MODE" != auto ]; then uci set netmode.main.gw_mode="$rq"; uci commit netmode; GW_MODE=$rq; fi ;;
+		esac
+	fi
 	switch
 
 	if [ $tick = 1 ]; then
@@ -418,10 +482,14 @@ while true; do
 			if [ "$P_AVG" = - ] || [ "${P_AVG%.*}" -ge "$ALERT_PING" ] || [ "$P_LOSS" -ge "$ALERT_LOSS" ]; then lag=$((lag + 1)); else lag=0; fi
 			if [ "$lag" -ge "$ALERT_AFTER" ] && [ $((now - last_alert)) -ge "$ALERT_COOLDOWN" ]; then
 				last_alert=$now; lag=0
-				alt=$(awk -v g="$GW" '$1 != g && $3 < 100 && (b == "" || $2 < bp) { b = $1; bp = $2 } END { if (b != "") print b " (" bp " ms)" }' $RUN/probe 2>/dev/null)
+				alt=$(awk -v g="$GW" -v c=" $CANDS " '$1 != g && $3 < 100 && index(c, " " $1 " ") && (b == "" || $2 < bp) { b = $1; bp = $2 } END { print b }' $RUN/probe 2>/dev/null)
 				if [ "$P_AVG" = - ]; then now_txt="no ping replies"; else now_txt="${P_AVG%.*} ms, $P_LOSS % loss"; fi
-				notify alert "⚠️ Lag on the game WAN $GW during the match: $now_txt (bad for the last $((ALERT_AFTER * INTERVAL)) s).${alt:+
-Fastest other WAN: $alt — switch in LuCI → Services → Netmode.}"
+				if [ -n "$alt" ]; then
+					notify alert "⚠️ Lag on the game WAN $GW during the match: $now_txt (bad for the last $((ALERT_AFTER * INTERVAL)) s).
+Fastest other WAN: $alt$(ping_of "$alt"). Switch the running match? The game freezes for about a second." "$(kb_switch "$alt" "$GW")"
+				else
+					notify alert "⚠️ Lag on the game WAN $GW during the match: $now_txt (bad for the last $((ALERT_AFTER * INTERVAL)) s)."
+				fi
 			fi
 		else
 			lag=0
