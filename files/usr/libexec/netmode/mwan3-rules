@@ -1,0 +1,97 @@
+#!/bin/sh
+# Builds netmode's mwan3 policies and rules; every WAN in netmode.main.wans can be the game WAN.
+#   mwan3-rules apply    rebuild + mwan3 restart
+#   mwan3-rules check    rebuild + mwan3 restart only if the devices / WANs / weights changed since the last build
+#   mwan3-rules dry      build into /tmp/ucitest (a copy of the live mwan3 config) and print it
+#   mwan3-rules remove   delete every netmode section; default_rule_v4 then uses a plain policy over all WANs
+# netmode owns the mwan3 sections named nm_* and the rule default_rule_v4 (re-created last, so your own rules
+# placed before it keep priority).
+. /lib/functions.sh
+. "${NETMODE_LIB:-/usr/lib/netmode/common.sh}"
+config_load netmode
+config_get GAME_IPS main game_ip ""
+config_get WANS main wans ""; [ -n "$WANS" ] || WANS=$(mwan3_ifaces)
+config_get CANDS main cands ""; [ -n "$CANDS" ] || CANDS=$WANS
+config_get WEIGHTS main weight ""
+weight() { for e in $WEIGHTS; do [ "${e%%:*}" = "$1" ] && { echo "${e#*:}"; return; }; done; echo 1; }
+SIG="$GAME_IPS|$WANS|$WEIGHTS"
+# mwan3 hands src_ip to iptables -s, which expands a comma list into one rule per device
+SRC=$(for ip in $GAME_IPS; do printf '%s/32,' "$ip"; done); SRC=${SRC%,}
+
+UCI=uci
+case "$1" in
+	check) [ "$(uci -q get mwan3.nm_gpc_default.netmode_sig)" = "$SIG" ] && exit 0 ;;
+	dry) mkdir -p /tmp/ucitest; cp /etc/config/mwan3 /tmp/ucitest/mwan3; UCI="uci -c /tmp/ucitest" ;;
+	apply|remove) ;;
+	*) echo "usage: $0 apply|check|dry|remove"; exit 1 ;;
+esac
+[ -n "$WANS" ] || { echo "no WANs: set netmode.main.wans or configure mwan3 interfaces"; exit 1; }
+
+# every netmode section (safe to re-run)
+$UCI -q delete mwan3.default_rule_v4
+for s in $($UCI show mwan3 | sed -n 's/^mwan3\.\(nm_[a-z0-9_]*\)=.*/\1/p'); do $UCI -q delete "mwan3.$s"; done
+
+member() { $UCI set "mwan3.$1=member"; $UCI set "mwan3.$1.interface=$2"; $UCI set "mwan3.$1.metric=$3"; $UCI set "mwan3.$1.weight=$4"; }
+policy() { $UCI set "mwan3.$1=policy"; $UCI set "mwan3.$1.last_resort=default"; }
+use()    { $UCI add_list "mwan3.$1.use_member=$2"; }
+rule()   { n=$1; shift; $UCI set "mwan3.$n=rule"; $UCI set "mwan3.$n.family=ipv4"
+	while [ $# -gt 1 ]; do $UCI set "mwan3.$n.$1=$2"; shift 2; done; }
+
+if [ "$1" = remove ]; then
+	for s in balanced_all $($UCI show mwan3 | sed -n 's/^mwan3\.\(bal_[a-z0-9_]*\)=member$/\1/p'); do $UCI -q delete "mwan3.$s"; done
+	policy balanced_all
+	for w in $WANS; do member "bal_$w" "$w" 1 "$(weight $w)"; use balanced_all "bal_$w"; done
+	rule default_rule_v4 dest_ip 0.0.0.0/0 proto all sticky 0 use_policy balanced_all
+	$UCI commit mwan3
+	logger -t netmode "mwan3 rules removed (default_rule_v4 -> balanced_all)"
+	mwan3 restart
+	exit 0
+fi
+
+# nm_all: every WAN
+policy nm_all
+for w in $WANS; do member "nm_all_$w" "$w" 1 "$(weight $w)"; use nm_all "nm_all_$w"; done
+for g in $WANS; do
+	# nm_game_<g>: the game WAN first, every other WAN as fallback
+	policy "nm_game_$g"; member "nm_gm_${g}_$g" "$g" 1 1; use "nm_game_$g" "nm_gm_${g}_$g"
+	for w in $WANS; do [ "$w" = "$g" ] && continue; member "nm_gm_${g}_$w" "$w" 2 "$(weight $w)"; use "nm_game_$g" "nm_gm_${g}_$w"; done
+	# nm_oth_<g>: everyone else on every WAN except <g> (which is only a last fallback)
+	policy "nm_oth_$g"
+	for w in $WANS; do [ "$w" = "$g" ] && continue; member "nm_ot_${g}_$w" "$w" 1 "$(weight $w)"; use "nm_oth_$g" "nm_ot_${g}_$w"; done
+	member "nm_ot_${g}_$g" "$g" 2 1; use "nm_oth_$g" "nm_ot_${g}_$g"
+done
+
+# rules, first match wins (the nm_g_* / nm_gw_* ipsets are the switches the daemon flips); names <= 15 chars
+for g in $WANS; do rule "nm_quic_g_$g" proto udp dest_port 443 ipset "nm_g_$g" use_policy "nm_oth_$g"; done
+rule nm_quic_all proto udp dest_port 443 use_policy nm_all
+if [ -n "$SRC" ]; then
+	for g in $WANS; do rule "nm_gpc_$g" src_ip "$SRC" proto udp ipset "nm_gw_$g" use_policy "nm_game_$g"; done
+	rule nm_gpc_default src_ip "$SRC" proto udp use_policy "nm_game_${CANDS%% *}"
+else
+	# no gaming devices yet: a placeholder that matches nothing keeps the build signature
+	rule nm_gpc_default src_ip 0.0.0.0/32 proto udp use_policy nm_all
+fi
+$UCI set "mwan3.nm_gpc_default.netmode_sig=$SIG"
+for g in $WANS; do rule "nm_oth_g_$g" proto all ipset "nm_g_$g" use_policy "nm_oth_$g"; done
+rule default_rule_v4 dest_ip 0.0.0.0/0 proto all sticky 0 use_policy nm_all
+$UCI commit mwan3
+
+if [ "$1" = dry ]; then
+	echo "--- rules (in order):"
+	for r in $($UCI show mwan3 | sed -n 's/^mwan3\.\([a-z0-9_]*\)=rule$/\1/p'); do
+		printf "  %-16s %-28s %-4s %-4s %-12s -> %s\n" "$r" "$($UCI -q get mwan3.$r.src_ip)" "$($UCI -q get mwan3.$r.proto)" \
+			"$($UCI -q get mwan3.$r.dest_port)" "$($UCI -q get mwan3.$r.ipset)" "$($UCI -q get mwan3.$r.use_policy)"
+	done
+	echo "--- policies:"
+	for p in nm_all $(for g in $WANS; do echo "nm_game_$g nm_oth_$g"; done); do
+		printf "  %-14s" "$p"; for mb in $($UCI -q get mwan3.$p.use_member); do
+			printf " %s(m%s,w%s)" "$($UCI -q get mwan3.$mb.interface)" "$($UCI -q get mwan3.$mb.metric)" "$($UCI -q get mwan3.$mb.weight)"; done; echo
+	done
+	exit 0
+fi
+
+for w in $WANS; do ipset -exist create "nm_gw_$w" hash:net; ipset -exist create "nm_g_$w" hash:net; done
+logger -t netmode "mwan3 rules rebuilt (gaming devices ${GAME_IPS:-none}, WANs $WANS)"
+mwan3 restart
+kill -USR1 "$(cat /var/run/netmode/pid 2>/dev/null)" 2>/dev/null
+exit 0

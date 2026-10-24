@@ -1,0 +1,61 @@
+#!/bin/sh
+# netmode-sampler — one sample per second for the live graphs: a ping through the game WAN to the probe target
+# and each gaming device's UDP upload. Keeps the last 15 minutes in /var/run/netmode/live:
+#   "ts ping_ms|- state game_wan ip=bytes,ip=bytes,..."
+# Each ping gets 2 s to answer (a congested WAN can be slower than 1 s without losing anything), so a second is
+# written 2 s after it starts: the pings overlap in 3 slots. The decisions stay with netmode-daemon.
+. /lib/functions.sh
+. /usr/lib/netmode/common.sh
+RUN=/var/run/netmode
+DATA=/etc/netmode
+KEEP=900
+
+load() {
+	config_load netmode
+	config_get GAME_IPS main game_ip ""
+	config_get DEFAULT_TARGET main default_target 8.8.8.8
+	config_get_bool LIVE main live_ping 1
+}
+
+mkdir -p $RUN
+load
+: > $RUN/live.flows
+udp_delta "$GAME_IPS" $RUN/live.flows > /dev/null
+n=0; lgw=""; dev=""; pp_0=""; pp_1=""; pp_2=""; row_0=""; row_1=""; row_2=""
+
+while true; do
+	now=$(date +%s)
+	n=$((n + 1)); slot=$((n % 3)); [ $((n % 10)) = 0 ] && load
+
+	gw=$(cat $DATA/gw 2>/dev/null)
+	[ "$gw" = "$lgw" ] || { dev=$(dev_of "$gw"); lgw=$gw; }
+	[ $((n % 30)) = 0 ] && dev=$(dev_of "$gw")  # catch the WAN coming back up
+	tgt=$DEFAULT_TARGET; [ -f $DATA/target ] && read -r tgt _ < $DATA/target
+	state=all; [ -f $RUN/state ] && read -r state _ < $RUN/state
+
+	rm -f "$RUN/live.ping.$slot"
+	if [ "$LIVE" = 1 ] && [ -n "$dev" ]; then
+		ping -I "$dev" -c 1 -W 2 "$tgt" > "$RUN/live.ping.$slot" 2>/dev/null &
+		eval "pp_$slot=$!"
+	else
+		eval "pp_$slot=''"
+	fi
+	set -- $(udp_delta "$GAME_IPS" $RUN/live.flows)
+	eval "row_$slot=\"$now ${state:-all} ${gw:--} ${4:--}\""
+	sleep 1
+
+	# the slot started two seconds ago has had its 2 s: write its line
+	old=$(( (n + 1) % 3 ))
+	eval "opp=\$pp_$old; orow=\$row_$old"
+	[ -n "$orow" ] || continue
+	p=-
+	if [ -n "$opp" ]; then
+		kill "$opp" 2>/dev/null
+		p=$(sed -n 's/.*time=\([0-9.]*\).*/\1/p' "$RUN/live.ping.$old")
+		p=${p:--}
+	fi
+	set -- $orow
+	echo "$1 $p $2 $3 $4" >> $RUN/live
+	eval "row_$old=''"
+	[ $((n % 60)) = 0 ] && { tail -n $KEEP $RUN/live > $RUN/live.tmp && mv $RUN/live.tmp $RUN/live; }
+done

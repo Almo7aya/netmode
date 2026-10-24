@@ -1,0 +1,84 @@
+#!/bin/sh
+# rpcd plugin for netmode (LuCI widget + pages, other dashboards):
+#   ubus call netmode status                    current state (/var/run/netmode/status.json) + "running"
+#   ubus call netmode history '{"since":0}'      graph points after "since" (oldest first, up to 3 h):
+#       points: [ts, udp_total, ping|null, loss|null, state, gw, {device_ip: udp}]   (every interval)
+#       probes: [ts, {wan: p20|null}]                                                (every probe round)
+#   ubus call netmode live '{"since":0}'         1 s samples after "since" (last 15 min):
+#       points: [ts, ping|null, state, gw, {device_ip: udp_bytes}]
+#   ubus call netmode matches '{"limit":50}'    match reports, newest first
+#   ubus call netmode set '{"mode":"game"}' / '{"gw":"wan1"}'
+#   ubus call netmode clear_matches
+RUN=/var/run/netmode
+DATA=/etc/netmode
+
+arg() { echo "$input" | jsonfilter -e "@.$1" 2>/dev/null; }
+
+case "$1" in
+list)
+	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str"},"clear_matches":{}}'
+	;;
+call)
+	read -r input
+	case "$2" in
+	status)
+		S=$RUN/status.json
+		if [ -s $S ] && [ -f $RUN/pid ] && [ $(( $(date +%s) - $(date -r $S +%s) )) -lt 120 ]; then
+			sed '1s/^{/{"running":true,/' $S
+		else
+			echo '{"running":false}'
+		fi
+		;;
+	history)
+		since=$(arg since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
+		{
+			printf '{"points":['
+			[ -s $RUN/hist ] && awk -v s="$since" '$1 > s {
+				dv = ""; n = split(($7 == "-" || $7 == "") ? "" : $7, a, ",")
+				for (i = 1; i <= n; i++) { split(a[i], kv, "="); dv = dv (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
+				printf "%s[%s,%s,%s,%s,\"%s\",\"%s\",{%s}]", (c++ ? "," : ""), $1, $2,
+					($3 == "-" ? "null" : $3), ($4 == "-" ? "null" : $4), $5, $6, dv }' $RUN/hist
+			printf '],"probes":['
+			[ -s $RUN/probehist ] && awk -v s="$since" '$1 > s {
+				w = ""; for (i = 2; i <= NF; i++) { split($i, kv, "="); w = w (i > 2 ? "," : "") "\"" kv[1] "\":" (kv[2] == "-" ? "null" : kv[2]) }
+				printf "%s[%s,{%s}]", (c++ ? "," : ""), $1, w }' $RUN/probehist
+			echo ']}'
+		}
+		;;
+	live)
+		since=$(arg since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
+		printf '{"points":['
+		[ -s $RUN/live ] && awk -v s="$since" '$1 > s && NF >= 4 {
+			dv = ""; n = split(($5 == "-" || $5 == "") ? "" : $5, a, ",")
+			for (i = 1; i <= n; i++) { split(a[i], kv, "="); dv = dv (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
+			printf "%s[%s,%s,\"%s\",\"%s\",{%s}]", (c++ ? "," : ""), $1, ($2 == "-" ? "null" : $2), $3, $4, dv }' $RUN/live
+		echo ']}'
+		;;
+	matches)
+		n=$(arg limit); case "$n" in ''|*[!0-9]*) n=50 ;; esac
+		{ [ -s $DATA/matches.jsonl ] && tail -n "$n" $DATA/matches.jsonl; } | sed '1!G;h;$!d' |
+			awk 'BEGIN { printf "{\"matches\":[" } { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { print "]}" }'
+		;;
+	set)
+		mode=$(arg mode); gw=$(arg gw); err=""
+		if [ -n "$mode" ]; then
+			case "$mode" in auto|game|all) /usr/sbin/netmode "$mode" >/dev/null ;; *) err="bad mode" ;; esac
+		fi
+		if [ -n "$gw" ]; then
+			case " auto $(jsonfilter -i $RUN/status.json -e '@.wans[*]' 2>/dev/null | tr '\n' ' ') " in
+				*" $gw "*) /usr/sbin/netmode gw "$gw" >/dev/null ;;
+				*) err="bad gw" ;;
+			esac
+		fi
+		if [ -n "$err" ]; then echo "{\"ok\":false,\"error\":\"$err\"}"; else echo '{"ok":true}'; fi
+		;;
+	clear_matches)
+		: > $DATA/matches.jsonl
+		echo '{"ok":true}'
+		;;
+	*)
+		echo '{"error":"unknown method"}'
+		;;
+	esac
+	;;
+esac

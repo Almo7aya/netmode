@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+# netmode: game mode / all-WANs switching for mwan3 (settings in /etc/config/netmode).
+#   daemon  : /usr/sbin/netmode-daemon  (decisions, probes, match reports)
+#   sampler : /usr/sbin/netmode-sampler (1 s samples for the live graphs)
+# Starts before mwan3 (19) so the netmode ipsets exist when mwan3 loads its rules.
+START=18
+USE_PROCD=1
+
+start_service() {
+	. /usr/lib/netmode/common.sh
+	config_load netmode
+	config_get wans main wans ""; [ -n "$wans" ] || wans=$(mwan3_ifaces)
+	for w in $wans; do
+		ipset -exist create "nm_gw_$w" hash:net
+		ipset -exist create "nm_g_$w" hash:net
+	done
+	procd_open_instance daemon
+	procd_set_param command /usr/sbin/netmode-daemon
+	procd_set_param respawn
+	procd_set_param stderr 1
+	procd_close_instance
+	procd_open_instance sampler
+	procd_set_param command /usr/sbin/netmode-sampler
+	procd_set_param respawn
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger netmode
+}
+
+# LuCI "Save & Apply": the daemon reads its settings every tick; only the devices / WANs / weights need new mwan3 rules
+reload_service() {
+	/usr/libexec/netmode/mwan3-rules check
+	kill -USR1 "$(cat /var/run/netmode/pid 2>/dev/null)" 2>/dev/null
+	return 0
+}

@@ -1,0 +1,49 @@
+#!/bin/sh
+# netmode — choose how mwan3 shares the WANs (settings: /etc/config/netmode, LuCI: Services > Netmode).
+#   netmode auto | game | all     mode: automatic (default) / always game mode / always all WANs
+#   netmode gw auto | <wan>       game WAN: best of the candidates between matches / lock one now
+#                                 (with move_flows running matches move too; the game freezes ~1 s)
+#   netmode status                what is active and the latest measurements
+#   netmode matches [n]           the last n match reports (default 10)
+S=/var/run/netmode/status.json
+kick() { kill -USR1 "$(cat /var/run/netmode/pid 2>/dev/null)" 2>/dev/null; }
+set_opt() { uci set "netmode.main.$1=$2" && uci commit netmode && kick; }
+j() { jsonfilter -i $S -e "$1" 2>/dev/null; }
+hm() { date -d "@$1" +%H:%M 2>/dev/null; }
+
+case "$1" in
+	auto|game|all) set_opt mode "$1"; echo "mode: $1" ;;
+	gw)
+		wans=$(jsonfilter -i $S -e '@.wans[*]' 2>/dev/null | tr '\n' ' ')
+		case " auto $wans " in *" $2 "*) ;; *) echo "usage: netmode gw auto|$(echo $wans | tr ' ' '|')"; exit 1 ;; esac
+		set_opt gw_mode "$2"; echo "game WAN: $2" ;;
+	status|"")
+		[ -s $S ] && [ -f /var/run/netmode/pid ] || { echo "netmode is not running"; exit 1; }
+		echo "mode            : $(j @.mode) -> now $(j @.state)$([ "$(j @.playing)" = true ] && echo ' (playing)')"
+		echo "game WAN        : $(j @.gw) (selection: $(j @.gw_mode); auto picks among $(j '@.cands[*]' | tr '\n' ' '))"
+		echo "gaming devices  :"
+		jsonfilter -i $S -e '@.devices[*]' 2>/dev/null | while read -r d; do
+			f() { jsonfilter -s "$d" -e "$1"; }
+			printf '  %-15s %-16s %7s B per %s s%s\n' "$(f @.ip)" "$(f @.name)" "$(f @.udp)" "$(j @.interval)" \
+				"$([ "$(f @.playing)" = true ] && echo '  playing')"
+		done
+		echo "                  (game mode at >= $(j @.thresh) B per device)"
+		if [ -n "$(j @.ping.avg)" ]; then
+			echo "game WAN ping   : $(j @.ping.avg) ms avg, $(j @.ping.min)-$(j @.ping.max) ms, jitter $(j @.ping.jitter) ms, loss $(j @.ping.loss)%"
+		elif [ -n "$(j @.ping.loss)" ]; then
+			echo "game WAN ping   : no reply"
+		fi
+		echo "probe target    : $(j @.target) ($(j @.target_src); game server $(j @.server), edge router $(j @.edge))"
+		[ -n "$(j @.match.start)" ] && echo "match           : since $(hm "$(j @.match.start)")"
+		echo "WAN pings       :"
+		awk '{ if ($3 == 100) printf "  %-5s no reply\n", $1; else printf "  %-5s p20 %s ms, avg %s ms, loss %s%%\n", $1, $2, $4, $3 }' /var/run/netmode/probe 2>/dev/null
+		logread -e netmode 2>/dev/null | tail -5 ;;
+	matches)
+		tail -n "${2:-10}" /etc/netmode/matches.jsonl 2>/dev/null | while read -r m; do
+			f() { jsonfilter -s "$m" -e "$1"; }
+			printf '%s  %-15s %4s min  %-10s ping %5s ms  jitter %4s  loss %4s%%  spikes %s  %s MB\n' \
+				"$(date -d "@$(f @.start)" '+%m-%d %H:%M')" "$(f @.device)" "$(( $(f @.dur) / 60 ))" "$(f @.gw)" \
+				"$(f @.ping)" "$(f @.jitter)" "$(f @.loss)" "$(f @.spikes)" "$(f @.mb)"
+		done ;;
+	*) echo "usage: netmode auto|game|all | gw auto|<wan> | status | matches [n]"; exit 1 ;;
+esac

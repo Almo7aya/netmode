@@ -1,0 +1,443 @@
+'use strict';
+'require baseclass';
+'require rpc';
+'require ui';
+
+// Shared code for the netmode LuCI views: rpc calls, the mode / game-WAN controls, formatting and SVG charts.
+// Chart colours: the dataviz reference palette, categorical slots in fixed order (validated on the light and dark
+// LuCI surfaces). In light mode slots 3-5 sit below 3:1 contrast, so every series is also named, with its latest
+// value, in the legend.
+
+var callStatus = rpc.declare({ object: 'netmode', method: 'status' });
+var callHistory = rpc.declare({ object: 'netmode', method: 'history', params: [ 'since' ] });
+var callLive = rpc.declare({ object: 'netmode', method: 'live', params: [ 'since' ] });
+var callMatches = rpc.declare({ object: 'netmode', method: 'matches', params: [ 'limit' ] });
+var callClear = rpc.declare({ object: 'netmode', method: 'clear_matches' });
+var callSetMode = rpc.declare({ object: 'netmode', method: 'set', params: [ 'mode' ] });
+var callSetGw = rpc.declare({ object: 'netmode', method: 'set', params: [ 'gw' ] });
+
+var SVGNS = 'http://www.w3.org/2000/svg';
+
+var DARK = '--nm-c1:#3987e5;--nm-c2:#d95926;--nm-c3:#199e70;--nm-c4:#c98500;--nm-c5:#d55181;' +
+	'--nm-band:rgba(160,160,160,.11);--nm-grid:rgba(255,255,255,.08);--nm-axis:rgba(255,255,255,.22)';
+var CSS = [
+	'.nm{--nm-c1:#2a78d6;--nm-c2:#eb6834;--nm-c3:#1baf7a;--nm-c4:#eda100;--nm-c5:#e87ba4;--nm-crit:#d03b3b;--nm-good:#0ca30c;',
+	'--nm-band:rgba(120,120,120,.12);--nm-grid:rgba(0,0,0,.08);--nm-axis:rgba(0,0,0,.25);',
+	'--nm-line:rgba(128,128,128,.3);--nm-fill:rgba(128,128,128,.06);font:13px system-ui,-apple-system,"Segoe UI",sans-serif}',
+	':root[data-darkmode="true"] .nm{' + DARK + '}',
+	'@media (prefers-color-scheme:dark){:root:not([data-darkmode]) .nm{' + DARK + '}}',
+	'.nm-card{border:1px solid var(--nm-line);border-radius:10px;padding:14px 16px;background:var(--nm-fill);margin-bottom:14px}',
+	'.nm-card>h3{margin:0 0 10px;font-size:15px;display:flex;justify-content:space-between;align-items:center;border:0;padding:0}',
+	'.nm-head{display:grid;grid-template-columns:minmax(220px,1fr) minmax(280px,1.4fr);gap:12px 24px}',
+	'@media (max-width:760px){.nm-head{grid-template-columns:1fr}}',
+	'.nm-badge{display:inline-block;padding:3px 12px;border-radius:12px;font-weight:600;color:#fff;font-size:14px}',
+	'.nm-desc{margin-top:8px;line-height:1.5;opacity:.9}',
+	'.nm-label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.65;margin:0 0 4px}',
+	'.nm-seg{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}',
+	'.nm .nm-btn{font:inherit;color:inherit;background:transparent;border:1px solid var(--nm-line);border-radius:6px;',
+	'padding:4px 10px;margin:0;cursor:pointer;line-height:1.4;min-height:0;box-shadow:none;text-shadow:none}',
+	'.nm .nm-btn:hover{background:var(--nm-fill)}',
+	'.nm .nm-btn.on{background:var(--nm-c1);border-color:var(--nm-c1);color:#fff}',
+	'.nm .nm-btn.cur{box-shadow:inset 0 0 0 1px var(--nm-c1);border-color:var(--nm-c1)}',
+	'.nm .nm-btn small{opacity:.75;margin-left:5px;font-size:11px}',
+	'.nm .nm-btn[disabled]{opacity:.55;cursor:wait}',
+	'.nm-note{font-size:12px;opacity:.7;line-height:1.45}',
+	'.nm-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:14px}',
+	'.nm-tile{border:1px solid var(--nm-line);border-radius:8px;padding:8px 12px}',
+	'.nm-tile .v{font-size:22px;font-weight:600;line-height:1.3}',
+	'.nm-tile .v small{font-size:12px;font-weight:400;opacity:.7;margin-left:3px}',
+	'.nm-tile .d{font-size:12px;opacity:.75;margin-top:2px;line-height:1.4}',
+	'.nm-live{font-size:12px;font-weight:400;display:inline-flex;align-items:center;gap:6px;opacity:.85}',
+	'.nm-live i{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--nm-good)}',
+	'.nm-live.stale i{background:var(--nm-crit)}',
+	'.nm-block{position:relative;padding-top:14px;margin-top:14px;border-top:1px solid var(--nm-line)}',
+	'.nm-block:first-of-type{border-top:0;margin-top:4px;padding-top:4px}',
+	'.nm-bh{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}',
+	'.nm-bh .t{font-weight:600;font-size:14px}.nm-bh .s{opacity:.6;font-size:12px;margin-top:2px}',
+	'.nm-bh .now{text-align:right}.nm-bh .now b{font-size:20px;font-weight:600}.nm-bh .now small{opacity:.7;margin-left:3px}',
+	'.nm-bh .now div{font-size:12px;opacity:.7;font-variant-numeric:tabular-nums}',
+	'.nm-legend{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12px;margin:8px 0 2px}',
+	'.nm-legend span{display:inline-flex;align-items:center;gap:6px;opacity:.85}',
+	'.nm-legend b{font-weight:600;font-variant-numeric:tabular-nums}',
+	'.nm svg{display:block;overflow:visible}',
+	'.nm svg.plot{width:100%;user-select:none}',
+	'.nm-tip{position:absolute;pointer-events:none;z-index:5;padding:7px 10px;border-radius:7px;background:Canvas;color:CanvasText;',
+	'box-shadow:0 4px 14px rgba(0,0,0,.28);border:1px solid var(--nm-line);white-space:nowrap;font-size:12px;',
+	'font-variant-numeric:tabular-nums;line-height:1.6}',
+	'.nm-tip b{font-weight:600;margin-right:6px}',
+	'.nm-tip .k{display:inline-block;width:12px;height:2px;vertical-align:middle;margin-right:6px;border-radius:1px}',
+	'.nm-tip .m{opacity:.65}',
+	'.nm table td,.nm table th{font-variant-numeric:tabular-nums}'
+].join('');
+
+function S(tag, attrs, children) {
+	var n = document.createElementNS(SVGNS, tag);
+	for (var k in attrs)
+		if (attrs[k] != null)
+			n.setAttribute(k, attrs[k]);
+	(children || []).forEach(function(c) { n.appendChild(typeof(c) == 'string' ? document.createTextNode(c) : c); });
+	return n;
+}
+
+function niceStep(v) {
+	var p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p;
+	return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+
+function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+function hhmm(ts, secs) {
+	var d = new Date(ts * 1000);
+	return pad(d.getHours()) + ':' + pad(d.getMinutes()) + (secs ? ':' + pad(d.getSeconds()) : '');
+}
+
+// the colour behind a node, for the 2px surface rings around markers
+function surfaceOf(node) {
+	for (var n = node; n && n.nodeType == 1; n = n.parentNode) {
+		var c = getComputedStyle(n).backgroundColor;
+		if (c && c != 'transparent' && !/rgba\(.*,\s*0\)$/.test(c))
+			return c;
+	}
+	return 'Canvas';
+}
+
+function fmt(v) { return String(+v.toFixed(v < 10 && v % 1 ? 1 : 0)); }
+
+return baseclass.extend({
+	S: S,
+	hhmm: hhmm,
+	color: function(i) { return 'var(--nm-c' + ((i % 5) + 1) + ')'; },
+
+	status: function() { return L.resolveDefault(callStatus(), { running: false }); },
+	history: function(since) { return L.resolveDefault(callHistory(since || 0), { points: [], probes: [] }); },
+	live: function(since) { return L.resolveDefault(callLive(since || 0), { points: [] }); },
+	matches: function(limit) { return L.resolveDefault(callMatches(limit || 500), { matches: [] }); },
+	clearMatches: function() { return callClear(); },
+
+	css: function() {
+		if (!document.getElementById('nm-css'))
+			document.head.appendChild(E('style', { 'id': 'nm-css' }, [ CSS ]));
+	},
+
+	devName: function(d) { return d.name || d.ip; },
+
+	dur: function(s) {
+		s = Math.max(0, Math.round(s));
+		return s < 3600 ? Math.floor(s / 60) + ':' + pad(s % 60) : Math.floor(s / 3600) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60);
+	},
+
+	badge: function(st) {
+		return st.state == 'game'
+			? E('span', { 'class': 'nm-badge', 'style': 'background:#c0392b' }, [ '🎮 ' + _('Game mode') + ' · ' + st.gw ])
+			: E('span', { 'class': 'nm-badge', 'style': 'background:#27ae60' }, [ '🚀 ' + _('All WANs') ]);
+	},
+
+	describe: function(st) {
+		var names = (st.devices || []).map(this.devName).join(', ') || _('the gaming devices');
+		return st.state == 'game'
+			? _('Game WAN %s is reserved for %s; everyone else uses all the other WANs.').format(st.gw, names)
+			: _('Everyone uses every WAN; the game traffic of %s stays on %s.').format(names, st.gw);
+	},
+
+	/* Mode and game-WAN buttons. refresh() is called after a change is applied. */
+	controls: function(st, refresh) {
+		var probe = {}, all = [];
+		(st.probe || []).forEach(function(p) { probe[p.wan] = p; });
+
+		var btn = function(label, on, title, call, extra) {
+			var b = E('button', { 'type': 'button', 'class': 'nm-btn' + (on ? ' on' : '') + (extra || ''), 'title': title }, label);
+			b.addEventListener('click', function(ev) {
+				ev.preventDefault();
+				if (on) return;
+				all.forEach(function(x) { x.disabled = true; });
+				call().then(refresh).catch(function(e) {
+					all.forEach(function(x) { x.disabled = false; });
+					ui.addNotification(null, E('p', _('netmode: %s').format(e.message || e)), 'danger');
+				});
+			});
+			all.push(b);
+			return b;
+		};
+
+		var modes = E('div', { 'class': 'nm-seg' }, [
+			btn(_('Auto'), st.mode == 'auto', _('Game mode while a gaming device plays'), function() { return callSetMode('auto'); }),
+			btn('🎮 ' + _('Game'), st.mode == 'game', _('Game mode all the time'), function() { return callSetMode('game'); }),
+			btn('🚀 ' + _('All WANs'), st.mode == 'all', _('Never game mode'), function() { return callSetMode('all'); })
+		]);
+
+		var gws = E('div', { 'class': 'nm-seg' }, [
+			btn([ _('Auto'), st.gw_mode == 'auto' ? E('small', {}, [ st.gw ]) : '' ], st.gw_mode == 'auto',
+				_('Best of %s, picked between matches').format((st.cands || []).join(', ')), function() { return callSetGw('auto'); })
+		].concat((st.wans || []).map(function(w) {
+			var p = probe[w], ms = p ? (p.p20 != null ? p.p20 + ' ms' : _('no reply')) : '';
+			return btn([ (w == st.gw ? '● ' : '') + w, ms ? E('small', {}, [ ms ]) : '' ], st.gw_mode == w,
+				_('Lock the game WAN to %s now').format(w), function() { return callSetGw(w); }, w == st.gw ? ' cur' : '');
+		})));
+
+		var note = E('div', { 'class': 'nm-note' }, [
+			'● ' + _('current game WAN.') + ' ' +
+			(st.move_flows ? _('Picking a WAN locks it and moves running matches there now (the game freezes ~1 s).')
+			               : _('Picking a WAN locks it for new connections; running matches stay where they are.')) + ' ' +
+			_('Auto picks the best of %s between matches. WAN pings: 20th percentile of 10 pings.').format((st.cands || []).join(', '))
+		]);
+
+		return { modes: modes, gws: gws, note: note };
+	},
+
+	/* A time-series chart drawn in a shared time frame (so several charts line up under one crosshair).
+	 * sp: { W, H, frame: { L, R, t0, t1 }, unit, zero (y axis from 0), robust (rare spikes above the scale are clipped
+	 *       and marked), minSpan (smallest y range), thresh: { v, label },
+	 *       series: [{ label, color, pts: [[ts, v|null]], area, markers, tol (s, hover snapping) }],
+	 *       bands: [[ts0, ts1]] (shaded), marks: [{ ts, label }] (vertical markers), loss: [ts] (red ticks on top) }
+	 * returns { svg, show(ts), hide() } */
+	chart: function(sp) {
+		var f = sp.frame, W = sp.W, H = sp.H, top = 18, bottom = 22, span = f.t1 - f.t0;
+		var x = function(ts) { return f.L + (ts - f.t0) / span * (W - f.L - f.R); };
+
+		var vals = [];
+		sp.series.forEach(function(s) { s.pts.forEach(function(p) { if (p[0] >= f.t0 && p[1] != null) vals.push(p[1]); }); });
+		vals.sort(function(a, b) { return a - b; });
+		var q = function(p) { return vals[Math.min(vals.length - 1, Math.floor(p * (vals.length - 1)))]; };
+		var vmax = vals.length ? vals[vals.length - 1] : 0, hi = vmax, lo = sp.zero || !vals.length ? 0 : vals[0];
+		if (sp.robust && vals.length > 10) {
+			var cap = Math.max(q(0.98) * 1.25, q(0.5) + (sp.minSpan || 20) * 1.5);
+			if (vmax > cap) hi = cap;
+		}
+		if (sp.thresh) hi = Math.max(hi, sp.thresh.v * 1.25);
+		var step = niceStep(Math.max(hi - lo, sp.minSpan || 1) / 4);
+		var y0 = sp.zero ? 0 : Math.max(0, Math.floor((lo - step * 0.3) / step) * step);
+		var y1 = Math.max(y0 + step, Math.ceil((hi + step * 0.1) / step) * step);
+		var y = function(v) { return H - bottom - (Math.max(y0, Math.min(v, y1)) - y0) / (y1 - y0) * (H - bottom - top); };
+		var ring = 'var(--nm-ring, Canvas)', clipped = [];
+
+		var svg = S('svg', { 'class': 'plot', 'height': H, 'viewBox': '0 0 ' + W + ' ' + H, 'preserveAspectRatio': 'none' });
+
+		(sp.bands || []).forEach(function(b) {
+			if (b[1] <= f.t0) return;
+			var a = Math.max(b[0], f.t0);
+			svg.appendChild(S('rect', { 'x': x(a), 'y': top, 'width': Math.max(1, x(b[1]) - x(a)), 'height': H - bottom - top, 'fill': 'var(--nm-band)' }));
+		});
+		for (var v = y0; v <= y1 + 1e-9; v += step) {
+			svg.appendChild(S('line', { 'x1': f.L, 'x2': W - f.R, 'y1': y(v), 'y2': y(v), 'stroke': v == y0 ? 'var(--nm-axis)' : 'var(--nm-grid)',
+				'shape-rendering': 'crispEdges' }));
+			svg.appendChild(S('text', { 'x': f.L - 8, 'y': y(v) + 4, 'text-anchor': 'end', 'fill': 'currentColor', 'fill-opacity': 0.55,
+				'font-size': 11, 'style': 'font-variant-numeric:tabular-nums' }, [ fmt(v) + (v + step > y1 + 1e-9 ? ' ' + sp.unit : '') ]));
+		}
+		var ts = [ 60, 120, 300, 600, 900, 1800, 3600 ].filter(function(s) { return span / s <= 6; })[0] || 3600;
+		for (var t = Math.ceil(f.t0 / ts) * ts; t <= f.t1; t += ts) {
+			svg.appendChild(S('line', { 'x1': x(t), 'x2': x(t), 'y1': H - bottom, 'y2': H - bottom + 4, 'stroke': 'var(--nm-axis)' }));
+			svg.appendChild(S('text', { 'x': x(t), 'y': H - 5, 'text-anchor': 'middle', 'fill': 'currentColor', 'fill-opacity': 0.55, 'font-size': 11 }, [ hhmm(t) ]));
+		}
+		var lastLabel = -1e9;
+		(sp.marks || []).forEach(function(m) {
+			if (m.ts < f.t0) return;
+			var xx = x(m.ts);
+			svg.appendChild(S('line', { 'x1': xx, 'x2': xx, 'y1': top - 6, 'y2': H - bottom, 'stroke': 'currentColor', 'stroke-opacity': 0.45 }));
+			if (m.label && xx - lastLabel > 50) {
+				svg.appendChild(S('text', { 'x': xx + 4, 'y': top - 7, 'fill': 'currentColor', 'fill-opacity': 0.75, 'font-size': 11 }, [ m.label ]));
+				lastLabel = xx;
+			}
+		});
+		if (sp.thresh) {
+			svg.appendChild(S('line', { 'x1': f.L, 'x2': W - f.R, 'y1': y(sp.thresh.v), 'y2': y(sp.thresh.v), 'stroke': 'currentColor',
+				'stroke-opacity': 0.5, 'stroke-dasharray': '5 4' }));
+			svg.appendChild(S('text', { 'x': W - f.R, 'y': y(sp.thresh.v) - 5, 'text-anchor': 'end', 'fill': 'currentColor',
+				'fill-opacity': 0.65, 'font-size': 11 }, [ sp.thresh.label ]));
+		}
+
+		// series: area wash, 2px line, optional point markers; gaps where a value is missing
+		sp.series.forEach(function(s) {
+			var segs = [], cur = null;
+			s.pts.forEach(function(p) {
+				if (p[0] < f.t0) return;
+				if (p[1] == null) { cur = null; return; }
+				if (!cur) { cur = []; segs.push(cur); }
+				cur.push([ x(p[0]), y(p[1]) ]);
+				if (sp.robust && p[1] > y1) clipped.push([ x(p[0]), p[1] ]);
+			});
+			segs.forEach(function(seg) {
+				var d = seg.map(function(pt, i) { return (i ? 'L' : 'M') + pt[0].toFixed(1) + ',' + pt[1].toFixed(1); }).join('');
+				if (s.area && seg.length > 1)
+					svg.appendChild(S('path', { 'd': d + 'L' + seg[seg.length - 1][0].toFixed(1) + ',' + (H - bottom) + 'L' + seg[0][0].toFixed(1) + ',' + (H - bottom) + 'Z',
+						'fill': s.color, 'fill-opacity': 0.1, 'stroke': 'none' }));
+				svg.appendChild(S('path', { 'd': d, 'fill': 'none', 'stroke': s.color, 'stroke-width': s.width || 2, 'stroke-opacity': s.opacity || null,
+					'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+				if (s.markers || (seg.length == 1 && !s.opacity))
+					seg.forEach(function(pt) { svg.appendChild(S('circle', { 'cx': pt[0], 'cy': pt[1], 'r': 3, 'fill': s.color, 'stroke': ring, 'stroke-width': 1.5 })); });
+			});
+		});
+		// spikes above the scale: a small triangle on the top edge (the tooltip has the value)
+		clipped.forEach(function(c) {
+			svg.appendChild(S('path', { 'd': 'M' + (c[0] - 4) + ',' + (top + 1) + 'L' + (c[0] + 4) + ',' + (top + 1) + 'L' + c[0] + ',' + (top - 5) + 'Z',
+				'fill': 'currentColor', 'fill-opacity': 0.75 }));
+		});
+		(sp.loss || []).forEach(function(lt) {
+			if (lt < f.t0) return;
+			svg.appendChild(S('line', { 'x1': x(lt), 'x2': x(lt), 'y1': top, 'y2': top + 7, 'stroke': 'var(--nm-crit)', 'stroke-width': 2, 'stroke-linecap': 'round' }));
+		});
+
+		var cross = S('line', { 'y1': top - 6, 'y2': H - bottom, 'stroke': 'currentColor', 'stroke-opacity': 0.5, 'visibility': 'hidden', 'pointer-events': 'none' });
+		svg.appendChild(cross);
+		var dots = sp.series.map(function(s) {
+			var c = S('circle', { 'r': s.opacity ? 3 : 4.5, 'fill': s.color, 'fill-opacity': s.opacity || null, 'stroke': ring, 'stroke-width': 2,
+				'visibility': 'hidden', 'pointer-events': 'none' });
+			svg.appendChild(c);
+			return c;
+		});
+		svg.appendChild(S('rect', { 'x': f.L, 'y': 0, 'width': Math.max(0, W - f.L - f.R), 'height': H, 'fill': 'transparent' }));
+
+		return {
+			svg: svg,
+			x: x,
+			clipped: clipped.length,
+			show: function(at) {
+				var xx = x(at);
+				cross.setAttribute('x1', xx); cross.setAttribute('x2', xx); cross.setAttribute('visibility', 'visible');
+				sp.series.forEach(function(s, i) {
+					var best = null, tol = s.tol || 5;
+					s.pts.forEach(function(p) { if (p[1] != null && Math.abs(p[0] - at) <= tol && (!best || Math.abs(p[0] - at) < Math.abs(best[0] - at))) best = p; });
+					if (best) { dots[i].setAttribute('cx', x(best[0])); dots[i].setAttribute('cy', y(best[1])); dots[i].setAttribute('visibility', 'visible'); }
+					else dots[i].setAttribute('visibility', 'hidden');
+				});
+			},
+			hide: function() {
+				cross.setAttribute('visibility', 'hidden');
+				dots.forEach(function(d) { d.setAttribute('visibility', 'hidden'); });
+			}
+		};
+	},
+
+	/* One crosshair + tooltip across charts drawn in the same frame.
+	 * times: timestamps to snap to; tip(ts) -> [nodes]; state keeps the hovered time across redraws */
+	syncHover: function(host, charts, frame, W, times, tip, state) {
+		var box = E('div', { 'class': 'nm-tip', 'style': 'display:none' });
+		host.appendChild(box);
+		requestAnimationFrame(function() { host.style.setProperty('--nm-ring', surfaceOf(host)); });
+		var x = function(ts) { return frame.L + (ts - frame.t0) / (frame.t1 - frame.t0) * (W - frame.L - frame.R); };
+		var show = function(at, clientY) {
+			if (!times.length) return;
+			var lo = 0, hi = times.length - 1;
+			while (hi - lo > 1) { var mid = (lo + hi) >> 1; if (times[mid] < at) lo = mid; else hi = mid; }
+			var best = Math.abs(times[lo] - at) <= Math.abs(times[hi] - at) ? times[lo] : times[hi];
+			state.hover = best;
+			if (clientY != null) state.hoverY = clientY - host.getBoundingClientRect().top;
+			charts.forEach(function(c) { c.show(best); });
+			box.replaceChildren.apply(box, tip(best));
+			box.style.display = '';
+			var px = x(best) * host.clientWidth / W, w = box.offsetWidth;
+			box.style.left = (px + 16 + w > host.clientWidth ? Math.max(0, px - w - 16) : px + 16) + 'px';
+			box.style.top = Math.max(0, Math.min((state.hoverY || 60) - 24, host.clientHeight - box.offsetHeight)) + 'px';
+		};
+		var hide = function() {
+			state.hover = null;
+			box.style.display = 'none';
+			charts.forEach(function(c) { c.hide(); });
+		};
+		charts.forEach(function(c) {
+			c.svg.addEventListener('pointermove', function(ev) {
+				var r = c.svg.getBoundingClientRect(), vx = (ev.clientX - r.left) * W / r.width;
+				show(frame.t0 + (vx - frame.L) / (W - frame.L - frame.R) * (frame.t1 - frame.t0), ev.clientY);
+			});
+			c.svg.addEventListener('pointerleave', hide);
+		});
+		if (state.hover != null && state.hover >= frame.t0) show(state.hover); else hide();
+	},
+
+	tipRow: function(value, label, color) {
+		return E('div', {}, [ color ? E('span', { 'class': 'k', 'style': 'background:' + color }) : '', E('b', {}, [ value ]), E('span', { 'class': 'm' }, [ label ]) ]);
+	},
+
+	/* legend items: [keyNode, label, value?] */
+	legend: function(items) {
+		return E('div', { 'class': 'nm-legend' }, items.map(function(it) {
+			return E('span', {}, [ it[0], it[1], it[2] != null ? E('b', {}, [ it[2] ]) : '' ]);
+		}));
+	},
+
+	lineKey: function(color, dash) {
+		return S('svg', { 'width': 16, 'height': 10 }, [ S('line', { 'x1': 1, 'y1': 5, 'x2': 15, 'y2': 5, 'stroke': color,
+			'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-dasharray': dash || null }) ]);
+	},
+
+	bandKey: function() {
+		return S('svg', { 'width': 16, 'height': 12 }, [ S('rect', { 'x': 1, 'y': 1, 'width': 14, 'height': 10, 'rx': 2, 'fill': 'var(--nm-band)' }) ]);
+	},
+
+	markKey: function() {
+		return S('svg', { 'width': 10, 'height': 12 }, [ S('line', { 'x1': 5, 'y1': 0, 'x2': 5, 'y2': 12, 'stroke': 'currentColor', 'stroke-opacity': 0.5 }) ]);
+	},
+
+	lossKey: function() {
+		return S('svg', { 'width': 10, 'height': 12 }, [ S('line', { 'x1': 5, 'y1': 2, 'x2': 5, 'y2': 10, 'stroke': 'var(--nm-crit)', 'stroke-width': 2, 'stroke-linecap': 'round' }) ]);
+	},
+
+	spikeKey: function() {
+		return S('svg', { 'width': 10, 'height': 10 }, [ S('path', { 'd': 'M1,9L9,9L5,2Z', 'fill': 'currentColor', 'fill-opacity': 0.75 }) ]);
+	},
+
+	/* One row per group, a dot per match at its average ping, a tick at the median.
+	 * rows: [{ label, values: [{ v, tip: [lines] }] }] */
+	strip: function(rows, width) {
+		var host = E('div', { 'class': 'nm-block', 'style': 'border:0;padding:0' }), tip = E('div', { 'class': 'nm-tip', 'style': 'display:none' });
+		var all = [];
+		rows.forEach(function(r) { r.values.forEach(function(v) { all.push(v.v); }); });
+		if (!all.length) return host;
+		var lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+		var step = niceStep(Math.max(hi - lo, 10) / 5), x0 = Math.floor(lo / step) * step, x1 = Math.ceil(hi / step) * step;
+		if (x1 == x0) x1 = x0 + step;
+		var W = width || 900, L = 140, R = 24, RH = 34, T = 6, H = T + rows.length * RH + 22;
+		var x = function(v) { return L + (v - x0) / (x1 - x0) * (W - L - R); };
+		var s = S('svg', { 'class': 'plot', 'height': H, 'viewBox': '0 0 ' + W + ' ' + H, 'preserveAspectRatio': 'none' });
+		for (var v = x0; v <= x1 + 1e-9; v += step) {
+			s.appendChild(S('line', { 'x1': x(v), 'x2': x(v), 'y1': T, 'y2': H - 22, 'stroke': 'var(--nm-grid)', 'shape-rendering': 'crispEdges' }));
+			s.appendChild(S('text', { 'x': x(v), 'y': H - 6, 'text-anchor': 'middle', 'fill': 'currentColor', 'fill-opacity': 0.55, 'font-size': 11 },
+				[ fmt(v) + (v + step > x1 + 1e-9 ? ' ms' : '') ]));
+		}
+		rows.forEach(function(r, i) {
+			var cy = T + i * RH + RH / 2, vals = r.values.map(function(v) { return v.v; }).sort(function(a, b) { return a - b; });
+			var med = vals.length % 2 ? vals[(vals.length - 1) / 2] : (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2;
+			s.appendChild(S('text', { 'x': 0, 'y': cy + 4, 'fill': 'currentColor', 'font-size': 12 }, [ r.label ]));
+			s.appendChild(S('line', { 'x1': L, 'x2': W - R, 'y1': cy, 'y2': cy, 'stroke': 'var(--nm-grid)' }));
+			r.values.forEach(function(v) {
+				s.appendChild(S('circle', { 'cx': x(v.v), 'cy': cy, 'r': 4, 'fill': 'var(--nm-c1)', 'fill-opacity': 0.85, 'stroke': 'var(--nm-ring, Canvas)', 'stroke-width': 2 }));
+				var hit = S('circle', { 'cx': x(v.v), 'cy': cy, 'r': 12, 'fill': 'transparent', 'tabindex': 0 });
+				var on = function() {
+					tip.replaceChildren.apply(tip, v.tip.map(function(t, k) { return E('div', k ? {} : { 'class': 'm' }, [ t ]); }));
+					tip.style.display = '';
+					var px = x(v.v) * host.clientWidth / W, w = tip.offsetWidth;
+					tip.style.left = (px + 14 + w > host.clientWidth ? Math.max(0, px - w - 14) : px + 14) + 'px';
+					tip.style.top = (cy + 8) + 'px';
+				};
+				var off = function() { tip.style.display = 'none'; };
+				hit.addEventListener('pointerenter', on); hit.addEventListener('focus', on);
+				hit.addEventListener('pointerleave', off); hit.addEventListener('blur', off);
+				s.appendChild(hit);
+			});
+			s.appendChild(S('line', { 'x1': x(med), 'x2': x(med), 'y1': cy - 10, 'y2': cy + 10, 'stroke': 'currentColor', 'stroke-width': 2, 'pointer-events': 'none' }));
+		});
+		host.appendChild(s);
+		host.appendChild(tip);
+		requestAnimationFrame(function() { host.style.setProperty('--nm-ring', surfaceOf(host)); });
+		return host;
+	},
+
+	/* Tiny ping-over-the-match line (null = no reply); the highest point gets a dot */
+	sparkline: function(series, w, h) {
+		var vals = series.filter(function(v) { return v != null; });
+		var s = S('svg', { 'width': w, 'height': h, 'viewBox': '0 0 ' + w + ' ' + h, 'style': 'display:inline-block;vertical-align:middle' });
+		if (vals.length < 2) return s;
+		var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals), span = Math.max(hi - lo, 10);
+		var x = function(i) { return 2 + i / (series.length - 1) * (w - 4); }, y = function(v) { return h - 3 - (v - lo) / span * (h - 6); };
+		var d = '', pen = false, peak = null;
+		series.forEach(function(v, i) {
+			if (v == null) { pen = false; return; }
+			d += (pen ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(v).toFixed(1);
+			pen = true;
+			if (v == hi && peak == null) peak = i;
+		});
+		s.appendChild(S('path', { 'd': d, 'fill': 'none', 'stroke': 'var(--nm-c1)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+		if (peak != null)
+			s.appendChild(S('circle', { 'cx': x(peak), 'cy': y(hi), 'r': 3, 'fill': 'var(--nm-c1)' }));
+		return s;
+	}
+});

@@ -1,0 +1,38 @@
+{
+	"admin/services/netmode": {
+		"title": "Netmode",
+		"order": 60,
+		"action": {
+			"type": "alias",
+			"path": "admin/services/netmode/dashboard"
+		},
+		"depends": {
+			"acl": [ "luci-app-netmode" ],
+			"uci": { "netmode": true }
+		}
+	},
+	"admin/services/netmode/dashboard": {
+		"title": "Dashboard",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "netmode/dashboard"
+		}
+	},
+	"admin/services/netmode/matches": {
+		"title": "Match reports",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "netmode/matches"
+		}
+	},
+	"admin/services/netmode/settings": {
+		"title": "Settings",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "netmode/settings"
+		}
+	}
+}

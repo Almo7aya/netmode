@@ -1,0 +1,18 @@
+{
+	"luci-app-netmode": {
+		"description": "Grant access to netmode (Status > Overview widget, Services > Netmode)",
+		"read": {
+			"ubus": {
+				"netmode": [ "status", "history", "live", "matches" ],
+				"luci-rpc": [ "getHostHints" ]
+			},
+			"uci": [ "netmode", "mwan3", "network" ]
+		},
+		"write": {
+			"ubus": {
+				"netmode": [ "set", "clear_matches" ]
+			},
+			"uci": [ "netmode" ]
+		}
+	}
+}

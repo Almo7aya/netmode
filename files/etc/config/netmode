@@ -1,0 +1,33 @@
+
+config netmode 'main'
+	# auto: game mode while a gaming device plays | game: always | all: never
+	option mode 'auto'
+	# gaming devices: their internet UDP gets the game WAN (e.g. list game_ip '192.168.1.50');
+	# changing the list rebuilds the mwan3 rules
+	# list game_ip ''
+	# game WAN: 'auto' picks the best of cands between matches, or a WAN name locks it at once
+	option gw_mode 'auto'
+	# WANs that can be the game WAN (empty: every mwan3 interface; install.sh fills it in) and the ones
+	# auto mode chooses from (empty: all of them)
+	# list wans 'wan'
+	# list cands 'wan'
+	# load-balancing weight per WAN, 'wan:weight' (default 1)
+	# list weight 'wan:2'
+	# move running matches when the game WAN changes (the game freezes ~1 s)
+	option move_flows '1'
+	# game detection: a device uploads >= thresh UDP bytes per interval seconds; game mode ends hold s later
+	option thresh '20000'
+	option interval '10'
+	option hold '120'
+	# learn the game server from a flow once it has moved learn_min bytes in one interval
+	option learn_min '100000'
+	# probing: every probe_every s, 10 pings per WAN; auto switches when a candidate is margin ms better rounds times
+	option probe_every '60'
+	option margin '15'
+	option rounds '3'
+	option default_target '8.8.8.8'
+	# pings through the game WAN for the graphs and match reports (5 every interval + 1 per second)
+	option live_ping '1'
+	# match reports: matches shorter than min_match s are dropped; keep the last keep_matches
+	option min_match '60'
+	option keep_matches '200'

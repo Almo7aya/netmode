@@ -1,0 +1,375 @@
+#!/bin/sh
+# netmode-daemon — dynamic WAN sharing for mwan3.
+#  * game mode : the gaming devices' internet UDP uses the game WAN; everyone else uses all other WANs
+#  * all mode  : everyone uses all WANs (the gaming devices' UDP stays on the game WAN, ready for the next match)
+#  * game WAN  : gw_mode auto picks the best of cands between matches (20th-percentile ping to the probe target);
+#                gw_mode <wan> locks it at once and (move_flows) moves running matches there (the game freezes ~1 s)
+#  * probe target: the game server if it answers ping, else the farthest router in front of it that does;
+#                when it stops answering (match servers come and go) -> that router, then default_target
+# Switches are ipsets matched by mwan3 rules (filled with 0.0.0.0/1 + 128.0.0.0/1 = "on", empty = "off"):
+#   nm_gw_<wan>  on while <wan> is the game WAN
+#   nm_g_<wan>   on while game mode is active AND <wan> is the game WAN
+# Config: /etc/config/netmode (read every tick)   Data: /etc/netmode/   Runtime: /var/run/netmode/
+# `kill -USR1 $(cat /var/run/netmode/pid)` (netmode CLI, rpcd, LuCI) applies config changes at once.
+. /lib/functions.sh
+. /usr/lib/netmode/common.sh
+RUN=/var/run/netmode
+DATA=/etc/netmode
+HIST=1080      # graph points kept (3 h at 10 s)
+PHIST=180      # probe rounds kept (3 h at 60 s)
+HOP_PRIV='^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'
+
+load_conf() {
+	config_load netmode
+	config_get MODE main mode auto
+	config_get GAME_IPS main game_ip ""
+	config_get GW_MODE main gw_mode auto
+	config_get WANS main wans ""; [ -n "$WANS" ] || WANS=$(mwan3_ifaces)
+	config_get CANDS main cands ""; [ -n "$CANDS" ] || CANDS=$WANS
+	config_get_bool MOVE_FLOWS main move_flows 1
+	config_get THRESH main thresh 20000
+	config_get INTERVAL main interval 10
+	config_get HOLD main hold 120
+	config_get LEARN_MIN main learn_min 100000
+	config_get PROBE_EVERY main probe_every 60
+	config_get MARGIN main margin 15
+	config_get ROUNDS main rounds 3
+	config_get DEFAULT_TARGET main default_target 8.8.8.8
+	config_get_bool LIVE_PING main live_ping 1
+	config_get MIN_MATCH main min_match 60
+	config_get KEEP_MATCHES main keep_matches 200
+}
+
+set_on()  { ipset -exist create "$1" hash:net; ipset -exist add "$1" 0.0.0.0/1; ipset -exist add "$1" 128.0.0.0/1; }
+set_off() { ipset -exist create "$1" hash:net; ipset flush "$1"; }
+
+apply_sets() {  # uses $EFF and $GW
+	for w in $WANS; do
+		if [ "$w" = "$GW" ]; then set_on "nm_gw_$w"; else set_off "nm_gw_$w"; fi
+		if [ "$w" = "$GW" ] && [ "$EFF" = game ]; then set_on "nm_g_$w"; else set_off "nm_g_$w"; fi
+	done
+}
+
+# device names from DHCP leases and static leases: "ip name" lines in $RUN/names
+load_names() {
+	{
+		awk '$3 && $4 && $4 != "*" { print $3, $4 }' /tmp/dhcp.leases 2>/dev/null
+		uci -q show dhcp | awk -F= '
+			/^dhcp\.[^.]+\.ip=/   { split($1, a, "."); ip[a[2]] = $2 }
+			/^dhcp\.[^.]+\.name=/ { split($1, a, "."); nm[a[2]] = $2 }
+			END { for (s in ip) if (s in nm) { gsub(/\x27/, "", ip[s]); gsub(/\x27/, "", nm[s]); print ip[s], nm[s] } }'
+	} > $RUN/names.tmp && mv $RUN/names.tmp $RUN/names
+}
+
+# move the gaming devices' running game flows to the current game WAN: their conntrack entries go, the next
+# packet is routed again (new WAN, new public IP) and the game reconnects
+move_flows() {
+	n=0
+	for f in $(awk '{ print $4 "," $2 }' $RUN/flows.prev 2>/dev/null | sort -u); do
+		conntrack -D -p udp -s "${f%,*}" -d "${f#*,}" >/dev/null 2>&1 && n=$((n + 1))
+	done
+	echo $n
+}
+
+# $3 pings to $2 through device $1, $4 s apart: prints "avg min max jitter loss%" (ms), "- - - - 100" if none answer
+pings() {
+	[ -n "$1" ] || { echo "- - - - 100"; return; }
+	ping -I "$1" -c "$3" -i "$4" -W 1 "$2" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' |
+		awk -v c="$3" '{ v[NR] = $1 } END {
+			n = NR; if (n == 0) { print "- - - - 100"; exit }
+			mn = v[1]; mx = v[1]
+			for (i = 1; i <= n; i++) {
+				s += v[i]; if (v[i] < mn) mn = v[i]; if (v[i] > mx) mx = v[i]
+				if (i > 1) j += (v[i] > v[i - 1]) ? v[i] - v[i - 1] : v[i - 1] - v[i]
+			}
+			printf "%.1f %.1f %.1f %.1f %d\n", s / n, mn, mx, (n > 1) ? j / (n - 1) : 0, (c - n) * 100 / c }'
+}
+
+# 20th-percentile ping (ms, integer) and loss % over 10 pings through device $1: prints "p20 loss avg"
+probe() {
+	[ -n "$1" ] || { echo "9999 100 -"; return; }
+	ping -I "$1" -c 10 -i 0.3 -W 2 "$2" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' |
+		awk '{ v[NR] = $1; s += $1 } END {
+			n = NR; if (n == 0) { print "9999 100 -"; exit }
+			for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (v[j] < v[i]) { t = v[i]; v[i] = v[j]; v[j] = t }
+			k = int(n * 0.2); if (k < 1) k = 1
+			printf "%d %d %d\n", v[k], (10 - n) * 10, s / n }'
+}
+
+answers() { [ "$(ping -I "$1" -c 4 -i 0.3 -W 1 "$2" 2>/dev/null | grep -c 'time=')" -ge 2 ]; }  # $1 = device, $2 = ip
+
+# background job: find a probe target for game server $1 through device $2 -> $RUN/learn "server target source edge"
+learn() {
+	srv=$1; d=$2; tgt=-; src=-; edge=-
+	answers "$d" "$srv" && { tgt=$srv; src=server; }
+	# the farthest public router on the path that answers ping: it stays when the match server goes away
+	for h in $(traceroute -n -i "$d" -q 1 -w 1 -m 25 "$srv" 2>/dev/null | awk -v s="$srv" -v re="$HOP_PRIV" '
+			$2 ~ /^[0-9]+\./ && $2 != s && $2 !~ re { h[++n] = $2 }
+			END { for (i = n; i > 0 && i > n - 4; i--) print h[i] }'); do
+		answers "$d" "$h" && { edge=$h; break; }
+	done
+	[ "$tgt" = - ] && [ "$edge" != - ] && { tgt=$edge; src=edge; }
+	echo "$srv $tgt $src $edge" > $RUN/learn.tmp && mv $RUN/learn.tmp $RUN/learn
+}
+
+save_target() { echo "$TARGET $TARGET_SRC $SERVER $EDGE" > $DATA/target; }
+
+# the probe target stopped answering through the game WAN: fall back to the edge router, then default_target
+fallback_target() {
+	d=$(dev_of "$GW")
+	for t in $EDGE $DEFAULT_TARGET; do
+		{ [ "$t" = - ] || [ "$t" = "$TARGET" ]; } && continue
+		if answers "$d" "$t"; then
+			logger -t netmode "probe target $TARGET ($TARGET_SRC) stopped answering -> $t"
+			[ "$t" = "$EDGE" ] && TARGET_SRC=edge || TARGET_SRC=default
+			TARGET=$t; save_target; return
+		fi
+	done
+	[ "$warned" = "$TARGET" ] || logger -t netmode "no ping replies through the game WAN $GW (target $TARGET, edge $EDGE, default $DEFAULT_TARGET)"
+	warned=$TARGET
+}
+
+# every probe_every s: 10 pings through every WAN in parallel; in gw_mode auto, count rounds where another
+# candidate beats the game WAN by margin ms (switching waits until nobody plays)
+probe_round() {
+	last_probe=$now; pids=""
+	for w in $WANS; do
+		probe "$(dev_of "$w")" "$TARGET" > "$RUN/p.$w" & pids="$pids $!"
+	done
+	for p in $pids; do  # a USR1 (apply now) interrupts wait: keep waiting until every probe is done
+		while kill -0 "$p" 2>/dev/null; do wait "$p"; done
+	done
+	: > $RUN/probe.new; best=""; bests=99999; cur_s=99999; alive=0; ph="$now"
+	for w in $WANS; do
+		set -- $(cat "$RUN/p.$w" 2>/dev/null); rm -f "$RUN/p.$w"
+		[ $# -ge 3 ] || set -- 9999 100 -
+		echo "$w $1 $2 $3" >> $RUN/probe.new
+		if [ "$2" -lt 100 ]; then alive=1; ph="$ph $w=$1"; else ph="$ph $w=-"; fi
+		case " $CANDS " in *" $w "*) ;; *) continue ;; esac
+		score=$(( $1 + $2 * 2 ))
+		[ "$score" -lt "$bests" ] && { bests=$score; best=$w; }
+		[ "$w" = "$GW" ] && cur_s=$score
+	done
+	mv $RUN/probe.new $RUN/probe
+	echo "$ph" >> $RUN/probehist
+	tail -n $PHIST $RUN/probehist > $RUN/probehist.tmp && mv $RUN/probehist.tmp $RUN/probehist
+	load_names
+	[ $alive = 1 ] || return  # nothing answers: a dead target (handled by fallback_target) or every WAN is down
+	if [ "$GW_MODE" = auto ] && [ -n "$best" ] && [ "$best" != "$GW" ] && [ $((cur_s - bests)) -ge "$MARGIN" ]; then
+		better=$((better + 1))
+	else
+		better=0
+	fi
+	if [ "$better" -ge "$ROUNDS" ] && [ "$playing" = 0 ]; then
+		newgw=$best; better=0; how="auto, $(tr '\n' ';' < $RUN/probe)"
+	fi
+}
+
+switch() {  # apply $want and $newgw
+	[ "$want" = "$EFF" ] && [ "$newgw" = "$GW" ] && return
+	[ "$want" != "$EFF" ] && logger -t netmode "mode $EFF -> $want (gaming devices UDP $UDP B/${INTERVAL}s)"
+	oldgw=$GW; EFF=$want; GW=$newgw; apply_sets
+	if [ "$GW" != "$oldgw" ]; then
+		echo "$GW" > $DATA/gw; better=0; n=0
+		[ "$MOVE_FLOWS" = 1 ] && n=$(move_flows)
+		logger -t netmode "game WAN $oldgw -> $GW ($how; moved $n game flows)"
+	fi
+}
+
+name_of() { awk -v ip="$1" '$1 == ip { n = $2 } END { print (n == "" ? "-" : n) }' $RUN/names 2>/dev/null; }
+
+# one JSON line per match in $DATA/matches.jsonl from the per-tick samples in $RUN/match.<key>
+# ("ts gw udp avg min max jitter loss"); the quiet tail after the last busy tick is not part of the match
+match_end() {  # $1 = device ip, $2 = start, $3 = last busy tick
+	k=$(key_of "$1"); f=$RUN/match.$k
+	[ -s "$f" ] && awk -v start="$2" -v last="$3" -v min="$MIN_MATCH" -v iv="$INTERVAL" -v ip="$1" -v nm="$(name_of "$1")" \
+			-v srv="$SERVER" -v tgt="$TARGET" -v tsrc="$TARGET_SRC" '
+		$1 > last { next }
+		{
+			n++; bytes += $3; ls += $8
+			if ($2 != pg) { gws = gws (pg == "" ? "" : ">") $2; if (pg != "") sw++; pg = $2 }
+			if ($4 == "-") { ser[n] = "null"; next }
+			k++; s += $4; js += $7; ser[n] = int($4 + 0.5)
+			if (mn == "" || $5 + 0 < mn) mn = $5 + 0
+			if ($6 + 0 > mx) mx = $6 + 0
+			hi[k] = $6
+		}
+		END {
+			dur = last - start
+			if (n == 0 || dur < min) exit
+			if (k) { avg = s / k; for (i = 1; i <= k; i++) if (hi[i] >= avg + 50) sp++ }
+			printf "{\"start\":%d,\"end\":%d,\"dur\":%d,\"device\":\"%s\",\"name\":\"%s\",\"gw\":\"%s\",\"switches\":%d,\"server\":\"%s\",\"target\":\"%s\",\"target_src\":\"%s\",\"mb\":%.1f,",
+				start, last, dur, ip, nm, gws, sw, srv, tgt, tsrc, bytes / 1048576
+			if (k) printf "\"ping\":%.1f,\"min\":%.1f,\"max\":%.1f,\"jitter\":%.1f,", avg, mn, mx, js / k
+			else printf "\"ping\":null,\"min\":null,\"max\":null,\"jitter\":null,"
+			printf "\"loss\":%.1f,\"spikes\":%d,\"interval\":%d,\"series\":[", ls / n, sp, iv
+			for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), ser[i]
+			print "]}"
+		}' "$f" >> $DATA/matches.jsonl
+	tail -n "$KEEP_MATCHES" $DATA/matches.jsonl > $DATA/matches.tmp 2>/dev/null && mv $DATA/matches.tmp $DATA/matches.jsonl
+	rm -f "$f"
+	[ $(($3 - $2)) -ge "$MIN_MATCH" ] && logger -t netmode "match over: $1, $(($3 - $2)) s on $GW"
+}
+
+# per-device state lives in variables named after the device: lb_<key> (last busy tick), ms_<key> / ml_<key>
+# (match start / last busy tick of the running match)
+getv() { eval "echo \"\${$1_$2:-}\""; }
+setv() { eval "$1_$2=\"\$3\""; }
+
+jlist() { echo "$*" | awk '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? "," : ""), $i }'; }
+
+write_status() {
+	pj=null
+	if [ "$LIVE_PING" = 1 ] && [ -n "$P_LOSS" ]; then
+		if [ "$P_AVG" = - ]; then pj="{\"loss\":$P_LOSS}"
+		else pj="{\"avg\":$P_AVG,\"min\":$P_MIN,\"max\":$P_MAX,\"jitter\":$P_JIT,\"loss\":$P_LOSS}"; fi
+	fi
+	probe_j=$(awk '{ printf "%s{\"wan\":\"%s\",\"p20\":%s,\"loss\":%s,\"avg\":%s}", (NR > 1 ? "," : ""), $1,
+		($3 == 100 ? "null" : $2), $3, ($4 == "-" ? "null" : $4) }' $RUN/probe 2>/dev/null)
+	# devices: "ip udp playing match_start" lines -> JSON (names from $RUN/names)
+	dev_j=$(for ip in $GAME_IPS; do
+			k=$(key_of "$ip"); lb=$(getv lb "$k"); ms=$(getv ms "$k")
+			pl=0; [ -n "$lb" ] && [ $((now - lb)) -lt "$HOLD" ] && pl=1
+			du=$(echo ",$DEV_UDP," | sed -n "s/.*,$ip=\([0-9]*\),.*/\1/p")
+			echo "$ip ${du:-0} $pl ${ms:--}"
+		done | awk -v nf=$RUN/names '
+			BEGIN { while ((getline l < nf) > 0) { split(l, a, " "); nm[a[1]] = a[2] } }
+			{ printf "%s{\"ip\":\"%s\",\"name\":\"%s\",\"udp\":%d,\"playing\":%s,\"match_start\":%s}", (NR > 1 ? "," : ""),
+				$1, (($1 in nm) ? nm[$1] : ""), $2 + 0, ($3 == 1 ? "true" : "false"), ($4 == "-" ? "null" : $4) }')
+	mj=null; [ -n "$M_FIRST" ] && mj="{\"start\":$M_FIRST,\"last\":$M_LAST}"
+	printf '{"ts":%s,"mode":"%s","state":"%s","playing":%s,"gw_mode":"%s","gw":"%s","game_ip":"%s","game_ips":[%s],"devices":[%s],"wans":[%s],"cands":[%s],"move_flows":%s,"interval":%s,"thresh":%s,"hold":%s,"udp":%s,"last_busy":%s,"ping":%s,"target":"%s","target_src":"%s","server":"%s","edge":"%s","default_target":"%s","probe_ts":%s,"probe":[%s],"match":%s}\n' \
+		"$now" "$MODE" "$EFF" "$([ "$playing" = 1 ] && echo true || echo false)" "$GW_MODE" "$GW" "${GAME_IPS%% *}" \
+		"$(jlist $GAME_IPS)" "$dev_j" "$(jlist $WANS)" "$(jlist $CANDS)" "$([ "$MOVE_FLOWS" = 1 ] && echo true || echo false)" \
+		"$INTERVAL" "$THRESH" "$HOLD" "$UDP" "$last_game" "$pj" \
+		"$TARGET" "$TARGET_SRC" "$SERVER" "$EDGE" "$DEFAULT_TARGET" "$last_probe" "$probe_j" "$mj" > $RUN/status.json.tmp
+	mv $RUN/status.json.tmp $RUN/status.json
+	# restart state: "EFF last_game" + one "ip last_busy match_start match_last" line per device
+	{
+		echo "$EFF $last_game"
+		for ip in $GAME_IPS; do
+			k=$(key_of "$ip"); lb=$(getv lb "$k"); ms=$(getv ms "$k"); ml=$(getv ml "$k")
+			echo "$ip ${lb:--} ${ms:--} ${ml:--}"
+		done
+	} > $RUN/state
+}
+
+load_conf
+mkdir -p $RUN $DATA
+echo $$ > $RUN/pid
+now=$(date +%s)
+GW=$(cat $DATA/gw 2>/dev/null); case " $WANS " in *" $GW "*) ;; *) GW=${CANDS%% *} ;; esac
+[ -f $DATA/target ] && read -r TARGET TARGET_SRC SERVER EDGE < $DATA/target
+[ -n "$TARGET" ] || { TARGET=$DEFAULT_TARGET; TARGET_SRC=default; }
+SERVER=${SERVER:--}; EDGE=${EDGE:--}
+# carry the state over a restart (e.g. an update in the middle of a match)
+EFF=all; last_game=0
+if [ -f $RUN/state ] && [ $((now - $(date -r $RUN/state +%s))) -lt "$HOLD" ]; then
+	{
+		read -r EFF last_game _
+		while read -r ip lb ms ml; do
+			case " $GAME_IPS " in *" $ip "*) ;; *) continue ;; esac
+			k=$(key_of "$ip")
+			[ "$lb" = - ] || setv lb "$k" "$lb"
+			[ "$ms" = - ] || setv ms "$k" "$ms"
+			[ "$ml" = - ] || setv ml "$k" "$ml"
+		done
+	} < $RUN/state
+fi
+case "$last_game" in ''|*[!0-9]*) last_game=0 ;; esac
+[ "$EFF" = game ] || EFF=all
+case "$MODE" in game) EFF=game ;; all) EFF=all ;; esac
+apply_sets
+load_names
+logger -t netmode "start: mode $MODE ($EFF), game WAN $GW, devices $GAME_IPS, probe target $TARGET ($TARGET_SRC)"
+
+: > $RUN/flows.prev; udp_delta "$GAME_IPS" $RUN/flows.prev > /dev/null
+last_tick=$now; last_probe=0; better=0; dead=0; warned=""; LP=""; how=""; l_asked=""
+UDP=0; DEV_UDP=""; P_AVG=-; P_MIN=-; P_MAX=-; P_JIT=-; P_LOSS=""; playing=0; M_FIRST=""; M_LAST=0
+[ $((now - last_game)) -lt "$HOLD" ] && playing=1
+trap 'kicked=1' USR1
+trap 'EFF=all; apply_sets; rm -f $RUN/pid; logger -t netmode "stopped: everyone back on all WANs"; exit 0' TERM INT
+write_status
+
+while true; do
+	sl=$((INTERVAL - ($(date +%s) - now))); [ "$sl" -lt 1 ] && sl=1
+	sleep "$sl" & SP=$!
+	wait $SP; kill $SP 2>/dev/null
+	load_conf
+	now=$(date +%s)
+	tick=0; [ $((now - last_tick)) -ge $((INTERVAL - 1)) ] && tick=1
+
+	if [ $tick = 1 ]; then
+		set -- $(udp_delta "$GAME_IPS" $RUN/flows.prev)
+		el=$((now - last_tick)); [ "$el" -lt 1 ] && el=1
+		UDP=$(($1 * INTERVAL / el)); top_b=$(($2 * INTERVAL / el)); top_dst=$3; last_tick=$now
+		# per device, normalised to one interval: "ip=bytes,..." ; a device is busy at >= thresh
+		DEV_UDP=$(echo "$4" | tr ',' '\n' | awk -F= -v f="$INTERVAL" -v el="$el" 'NF == 2 { printf "%s%s=%d", (NR > 1 ? "," : ""), $1, $2 * f / el }')
+		BUSY=""
+		for kv in $(echo "$DEV_UDP" | tr ',' ' '); do
+			[ "${kv#*=}" -ge "$THRESH" ] && { BUSY="$BUSY ${kv%%=*}"; setv lb "$(key_of "${kv%%=*}")" "$now"; last_game=$now; }
+		done
+	fi
+	playing=0; [ $((now - last_game)) -lt "$HOLD" ] && playing=1
+
+	# mode and a locked game WAN apply at once; auto picks the game WAN between matches
+	case "$MODE" in game) want=game ;; all) want=all ;; *) [ $playing = 1 ] && want=game || want=all ;; esac
+	newgw=$GW; how=manual
+	case " $WANS " in *" $GW_MODE "*) newgw=$GW_MODE ;; esac
+	switch
+
+	if [ $tick = 1 ]; then
+		if [ $((now - last_probe)) -ge "$PROBE_EVERY" ]; then
+			probe_round; switch
+		fi
+
+		# live ping of the game WAN (graphs, match reports, dead-target detection)
+		if [ "$LIVE_PING" = 1 ]; then
+			set -- $(pings "$(dev_of "$GW")" "$TARGET" 5 0.2)
+			P_AVG=$1; P_MIN=$2; P_MAX=$3; P_JIT=$4; P_LOSS=$5
+			if [ "$P_LOSS" = 100 ]; then dead=$((dead + 1)); else dead=0; warned=""; fi
+		else
+			P_AVG=-; P_LOSS=""
+			[ -f $RUN/probe ] && [ "$(awk -v g="$GW" '$1 == g { print $3 }' $RUN/probe)" = 100 ] && dead=$((dead + 1))
+		fi
+		[ "$dead" -ge 3 ] && { dead=0; fallback_target; }
+
+		# learn a probe target from a new game server (the busiest flow while playing), in the background
+		if [ -f $RUN/learn ]; then
+			read -r l_srv l_tgt l_src l_edge < $RUN/learn; rm -f $RUN/learn
+			if [ "$l_tgt" != - ]; then
+				TARGET=$l_tgt; TARGET_SRC=$l_src; SERVER=$l_srv; EDGE=$l_edge; save_target; dead=0
+				logger -t netmode "game server $l_srv -> probe target $TARGET ($TARGET_SRC; edge $EDGE)"
+			else
+				logger -t netmode "game server $l_srv: neither it nor the routers in front of it answer ping; keeping $TARGET"
+			fi
+		fi
+		if [ $playing = 1 ] && [ "$top_b" -ge "$LEARN_MIN" ] && [ "$top_dst" != "$SERVER" ] && [ "$top_dst" != "$l_asked" ] &&
+				! { [ -n "$LP" ] && kill -0 "$LP" 2>/dev/null; }; then
+			l_asked=$top_dst; learn "$top_dst" "$(dev_of "$GW")" & LP=$!
+		fi
+
+		# match reports, per device: a match runs from its first busy tick to its last one and ends after
+		# 3 quiet ticks (shorter than hold, so the lobby between two matches doesn't merge them)
+		M_FIRST=""; M_LAST=0
+		for ip in $GAME_IPS; do
+			k=$(key_of "$ip"); ms=$(getv ms "$k"); ml=$(getv ml "$k")
+			case " $BUSY " in *" $ip "*)
+				[ -n "$ms" ] || { ms=$((now - INTERVAL)); setv ms "$k" "$ms"; rm -f "$RUN/match.$k"; }
+				ml=$now; setv ml "$k" "$ml" ;;
+			esac
+			[ -n "$ms" ] || continue
+			du=$(echo ",$DEV_UDP," | sed -n "s/.*,$ip=\([0-9]*\),.*/\1/p")
+			echo "$now $GW ${du:-0} $P_AVG $P_MIN $P_MAX $P_JIT ${P_LOSS:-0}" >> "$RUN/match.$k"
+			if [ $((now - ml)) -gt $((3 * INTERVAL)) ]; then
+				match_end "$ip" "$ms" "$ml"; setv ms "$k" ""; setv ml "$k" ""
+			else
+				{ [ -z "$M_FIRST" ] || [ "$ms" -lt "$M_FIRST" ]; } && M_FIRST=$ms
+				[ "$ml" -gt "$M_LAST" ] && M_LAST=$ml
+			fi
+		done
+
+		echo "$now $UDP $P_AVG ${P_LOSS:--} $EFF $GW ${DEV_UDP:--}" >> $RUN/hist
+		tail -n $HIST $RUN/hist > $RUN/hist.tmp && mv $RUN/hist.tmp $RUN/hist
+	fi
+	write_status
+done
