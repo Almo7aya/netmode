@@ -40,16 +40,26 @@ let bus = connect();
 // the ubus connection catches SIGTERM / SIGINT, so a bot waiting on Telegram (curl) would not stop when procd asks
 signal('SIGTERM', 'default');
 signal('SIGINT', 'default');
-let token = '', chat = '', users = [], loaded = 0, started = time();
+let token = '', chat = '', users = [], labels = {}, loaded = 0, started = time();
+
+function list(v) { return v == null ? [] : (type(v) == 'array' ? v : [ v ]); }
 
 function load() {
 	let m = cursor().get_all('netmode', 'main') || {};
 	token = m.telegram_token || '';
 	chat = '' + (m.telegram_chat || '');
-	users = m.telegram_user ? (type(m.telegram_user) == 'array' ? m.telegram_user : [ m.telegram_user ]) : [];
+	users = list(m.telegram_user);
+	labels = {};
+	for (let l in list(m.label)) {
+		let i = index(l, ':');
+		if (i > 0 && i < length(l) - 1) labels[substr(l, 0, i)] = substr(l, i + 1);
+	}
 	loaded = time();
 	return m.telegram == '1' && match(token, /^[0-9]+:[A-Za-z0-9_-]+$/);
 }
+
+// a WAN by its display name (label), else its interface name
+function wl(w) { return labels[w] || w; }
 
 function api(method, params, timeout) {
 	writefile(REQ, sprintf('%J', params));
@@ -110,14 +120,14 @@ function devName(d) { return d.name || d.ip; }
 function statusText(s) {
 	if (!s || !s.running) return '⏹ netmode is not running';
 	let l = [];
-	push(l, s.state == 'game' ? '🎮 Game mode · game WAN ' + s.gw : '🚀 All WANs · game WAN ' + s.gw + ' ready');
+	push(l, s.state == 'game' ? '🎮 Game mode · game WAN ' + wl(s.gw) : '🚀 All WANs · game WAN ' + wl(s.gw) + ' ready');
 	push(l, 'Mode ' + s.mode + ' · game WAN ' + (s.gw_mode == 'auto' ? 'auto' : 'locked'));
 	let pl = filter(s.devices || [], (d) => d.playing);
 	push(l, length(pl) ? 'Playing: ' + join(', ', map(pl, devName)) : 'Nobody playing');
 	if (s.ping)
 		push(l, s.ping.avg != null ? sprintf('Ping %.0f ms · jitter %.1f ms · loss %d %%', s.ping.avg, s.ping.jitter, s.ping.loss) : 'Ping: no reply from ' + s.target);
 	if (s.match) push(l, 'Match: ' + dur(s.ts - s.match.start) + ' (since ' + hhmm(s.match.start) + ')');
-	push(l, 'WAN pings: ' + join(' · ', map(s.probe || [], (p) => p.wan + ' ' + (p.p20 != null ? p.p20 : '–'))));
+	push(l, 'WAN pings: ' + join(' · ', map(s.probe || [], (p) => wl(p.wan) + ' ' + (p.p20 != null ? p.p20 : '–'))));
 	return join('\n', l);
 }
 
@@ -131,10 +141,11 @@ function statusKb(s) {
 	] ];
 	let pr = {}, probes = s.probe || [], wans = s.wans || [], row = [], now = time();
 	for (let i = 0; i < length(probes); i++) pr[probes[i].wan] = probes[i];
+	// two per row: the display names are longer than the interface names
 	for (let i = 0; i < length(wans); i++) {
 		let w = wans[i], p = pr[w];
-		push(row, { text: (w == s.gw ? '● ' : '') + w + (p ? ' ' + (p.p20 != null ? p.p20 + ' ms' : '–') : ''), callback_data: 'gw:' + w + ':' + now });
-		if (length(row) == 3) { push(rows, row); row = []; }
+		push(row, { text: (w == s.gw ? '● ' : '') + wl(w) + (p ? ' · ' + (p.p20 != null ? p.p20 + ' ms' : '–') : ''), callback_data: 'gw:' + w + ':' + now });
+		if (length(row) == 2) { push(rows, row); row = []; }
 	}
 	push(row, { text: tick(s.gw_mode == 'auto', 'Auto WAN'), callback_data: 'gwauto' });
 	push(rows, row);
@@ -149,7 +160,7 @@ function pingsText(s) {
 		: 'WAN pings to ' + s.target + ' (20th percentile of 10):' ], probes = s.probe || [];
 	for (let i = 0; i < length(probes); i++) {
 		let p = probes[i];
-		push(l, (p.wan == s.gw ? '● ' : '○ ') + p.wan + (p.p20 != null ? sprintf(': %d ms (avg %d, loss %d %%)', p.p20, p.avg, p.loss) : ': no reply'));
+		push(l, (p.wan == s.gw ? '● ' : '○ ') + wl(p.wan) + (p.p20 != null ? sprintf(': %d ms (avg %d, loss %d %%)', p.p20, p.avg, p.loss) : ': no reply'));
 	}
 	return join('\n', l);
 }
@@ -161,7 +172,7 @@ function matchesText(n) {
 	for (let i = 0; i < length(ms); i++) {
 		let m = ms[i], t = localtime(m.start);
 		push(l, sprintf('%s/%s %s · %s · %d min · %s · %s', pad(t.mday), pad(t.mon), hhmm(m.start),
-			(m.name && m.name != '-') ? m.name : (m.device || '?'), int(m.dur / 60 + 0.5), replace(m.gw, />/g, '→'),
+			(m.name && m.name != '-') ? m.name : (m.device || '?'), int(m.dur / 60 + 0.5), join(' → ', map(split(m.gw || '?', '>'), wl)),
 			m.ping != null ? sprintf('%.0f ms, jitter %.1f, loss %.1f %%', m.ping, m.jitter, m.loss) : 'no ping'));
 	}
 	return join('\n', l);
@@ -200,15 +211,15 @@ function onCallback(q) {
 		return answer(q, 'This button has expired: send /status');
 
 	if (act == 'mode') { answer(q, 'Mode: ' + arg); s = setMode(arg); }
-	else if (act == 'gw' || act == 'sw') { answer(q, 'Switching the game WAN to ' + arg + '…'); s = setWan(arg); }
+	else if (act == 'gw' || act == 'sw') { answer(q, 'Switching the game WAN to ' + wl(arg) + '…'); s = setWan(arg); }
 	else if (act == 'gwauto') { answer(q, 'Game WAN: auto'); s = setWan('auto'); }
-	else if (act == 'keep') { writefile(RUN + '/snooze_until', '' + (time() + 900)); answer(q, 'Staying on ' + arg); s = nm('status'); }
+	else if (act == 'keep') { writefile(RUN + '/snooze_until', '' + (time() + 900)); answer(q, 'Staying on ' + wl(arg)); s = nm('status'); }
 	else { answer(q); s = nm('status'); }
 
 	if (act == 'sw' || act == 'keep') {
 		// a suggestion or an alert: keep its text, replace the buttons with what happened
-		let out = act == 'keep' ? '👍 Kept ' + arg + ': no more suggestions for 15 min.'
-			: (s && s.gw == arg ? '✅ Switched to ' + arg + ' at ' + hhmm(time()) + '.' : '⚠️ Still on ' + (s ? s.gw : '?') + ': send /status.');
+		let out = act == 'keep' ? '👍 Kept ' + wl(arg) + ': no more suggestions for 15 min.'
+			: (s && s.gw == arg ? '✅ Switched to ' + wl(arg) + ' at ' + hhmm(time()) + '.' : '⚠️ Still on ' + (s ? wl(s.gw) : '?') + ': send /status.');
 		api('editMessageText', { chat_id: c.id, message_id: msg.message_id, text: (msg.text || '') + '\n\n' + out });
 	}
 	else
@@ -233,7 +244,8 @@ function onMessage(m) {
 	}
 	else if (cmd == '/wan' || cmd == '/gw') {
 		s = nm('status') || {};
-		if (!arg || (arg != 'auto' && index(s.wans || [], arg) < 0)) send('Game WAN is ' + s.gw + ': /wan ' + join('|', s.wans || []) + '|auto', statusKb(s));
+		if (!arg || (arg != 'auto' && index(s.wans || [], arg) < 0))
+			send('Game WAN is ' + wl(s.gw) + '. /wan <name>:\n' + join('\n', map(s.wans || [], (w) => w + (labels[w] ? ' — ' + labels[w] : ''))) + '\nauto — netmode picks', statusKb(s));
 		else { s = setWan(arg); send(statusText(s), statusKb(s)); }
 	}
 	else if (cmd == '/pings') {

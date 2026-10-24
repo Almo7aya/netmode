@@ -40,8 +40,9 @@ match server see the same public IP.)
 - **Match reports** — per device, while it uploads ≥ 50 KB per 10 s (well above lobby and loading traffic; a
   match ends after 30 s below that): length, game WAN, server region, average / min / max ping, jitter, loss,
   spikes (≥ 50 ms above the match average), data used and the ping over the match.
-- **Live data** — a sampler records each gaming device's upload every second (last 15 min) and, while a dashboard
-  is open, pings through the game WAN once per second; the daemon keeps 3 h of 10 s points and every probe round.
+- **Live data** — a sampler records each gaming device's UDP upload and download every second (last 15 min) and,
+  while a dashboard is open, pings through the game WAN once per second; the daemon keeps 3 h of 10 s points and
+  every probe round.
 
 ## Mobile data
 
@@ -121,8 +122,9 @@ and adds the detour to the server's latency; what it can buy is resilience again
 - **Status → Overview → Network mode** — the current mode, mode buttons (Auto / Game / All WANs), game-WAN buttons
   with each WAN's latest round trip, and a one-line summary.
 - **Services → Netmode → Dashboard** — state, controls, live tiles and the graphs, refreshed every second:
-  game-WAN ping (1 s pings with a 10 s median), each gaming device's upload against the game-mode threshold, and
-  every WAN's round trip to the game region; 5 min to 3 h, one crosshair across all of them.
+  game-WAN ping (1 s pings with a 10 s median), each gaming device's UDP upload and download (10 s averages, the
+  upload against the game-mode and match thresholds), and every WAN's round trip to the game region; 5 min to 3 h,
+  one crosshair across all of them. WANs show their display names (`label`).
 - **Services → Netmode → Monitor** — the same live board in full screen for a second (wide) monitor: LuCI's menus
   are hidden and the charts are sized to the window, so everything fits without scrolling (press F11 for a full
   browser window; ✕ goes back).
@@ -188,6 +190,7 @@ netmode matches [n]         the last n match reports
 | `depends` (list) | — | `relay:wan1,wan4`: while relay is the game WAN, everyone else also avoids wan1 and wan4 |
 | `cands` (list) | the normal `wans` | WANs `auto` chooses from |
 | `weight` (list) | 1 each | load-balancing weight, `wan:weight` (e.g. `wan1:4`) |
+| `label` (list) | interface names | display names for the dashboard, match reports and Telegram, `wan:name` (e.g. `wan1:Fibre`) |
 | `move_flows` | `1` | move running matches when the game WAN changes |
 | `thresh` | `8000` | UDP bytes uploaded per interval that start game mode |
 | `match_thresh` | `50000` | UDP bytes per interval that count as a match (reports) |

@@ -36,7 +36,13 @@ return view.extend({
 	device: '',
 
 	load: function() {
-		return nm.matches(500);
+		return Promise.all([ nm.matches(500), nm.status() ]);
+	},
+
+	// "wan1>wan2" -> "Fibre → LTE" (display names from the running daemon)
+	gwName: function(gw) {
+		var st = this.st;
+		return String(gw || '?').split('>').map(function(w) { return nm.wl(st, w); }).join(' → ');
 	},
 
 	handleClear: function() {
@@ -53,7 +59,8 @@ return view.extend({
 
 	render: function(data) {
 		nm.css();
-		this.all = (data && data.matches) || [];
+		this.all = (data[0] && data[0].matches) || [];
+		this.st = data[1] || {};
 		this.root = E('div', { 'class': 'nm' });
 		this.draw();
 		var self = this;
@@ -116,17 +123,17 @@ return view.extend({
 				_('Avg jitter'), _('Avg loss'), _('Spikes per match') ].map(th))
 		].concat(summary.map(function(r) {
 			return E('tr', { 'class': 'tr' }, [
-				td(E('span', {}, [ E('strong', {}, [ r.wan ]), r.wan == best ? ' — ' + _('lowest ping') : '' ])),
+				td(E('span', {}, [ E('strong', {}, [ r.wan.indexOf(' ') < 0 ? self.gwName(r.wan) : r.wan ]), r.wan == best ? ' — ' + _('lowest ping') : '' ])),
 				td(String(r.n)), td(dur(r.time)), td(num(r.ping, ' ms')), td(num(r.jitter, ' ms')), td(num(r.loss, ' %')), td(num(r.spikes, ''))
 			]);
 		})));
 
 		var strip = nm.strip(order.map(function(k) {
 			return {
-				label: '%s (%d)'.format(k, groups[k].length),
+				label: '%s (%d)'.format(k.indexOf(' ') < 0 ? self.gwName(k) : k, groups[k].length),
 				values: groups[k].filter(function(m) { return m.ping != null; }).map(function(m) {
 					return { v: m.ping, tip: [ when(m.start) + ' · ' + devOf(m) + (m.region_name && m.region_name != '-' ? ' · ' + m.region_name : ''), _('%.1f ms average ping').format(m.ping),
-						_('%s on %s').format(dur(m.dur), m.gw), _('jitter %.1f ms, loss %.1f %%, %d spikes').format(m.jitter, m.loss, m.spikes) ] };
+						_('%s on %s').format(dur(m.dur), self.gwName(m.gw)), _('jitter %.1f ms, loss %.1f %%, %d spikes').format(m.jitter, m.loss, m.spikes) ] };
 				})
 			};
 		}), W);
@@ -136,7 +143,7 @@ return view.extend({
 				_('Loss'), _('Spikes'), _('Ping during the match'), _('Data'), _('Probe target') ].map(th))
 		].concat(ms.map(function(m) {
 			return E('tr', { 'class': 'tr' }, [
-				td(when(m.start)), td(devOf(m)), td(dur(m.dur)), td(m.gw.replace(/>/g, ' → ')),
+				td(when(m.start)), td(devOf(m)), td(dur(m.dur)), E('td', { 'class': 'td', 'title': m.gw.replace(/>/g, ' → ') }, [ self.gwName(m.gw) ]),
 				E('td', { 'class': 'td', 'title': m.region && m.region != '-' ? m.region : '' }, [ m.region_name && m.region_name != '-' ? m.region_name : '—' ]),
 				td(m.ping == null ? _('no reply') : '%.1f ms (%.0f–%.0f)'.format(m.ping, m.min, m.max)),
 				td(num(m.jitter, ' ms')), td(num(m.loss, ' %')), td(String(m.spikes)),

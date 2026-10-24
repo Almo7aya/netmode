@@ -2,10 +2,11 @@
 # rpcd plugin for netmode (LuCI widget + pages, other dashboards):
 #   ubus call netmode status                    current state (/var/run/netmode/status.json) + "running"
 #   ubus call netmode history '{"since":0}'      graph points after "since" (oldest first, up to 3 h):
-#       points: [ts, udp_total, ping|null, loss|null, state, gw, {device_ip: udp}]   (every interval)
+#       points: [ts, udp_total, ping|null, loss|null, state, gw, {device_ip: udp_up}, {device_ip: udp_down}]
+#                                                                                    (every interval)
 #       probes: [ts, {wan: p20|null}]                                                (every probe round)
 #   ubus call netmode live '{"since":0}'         1 s samples after "since" (last 15 min):
-#       points: [ts, ping|null, state, gw, {device_ip: udp_bytes}]
+#       points: [ts, ping|null, state, gw, {device_ip: up_bytes}, {device_ip: down_bytes}]
 #   ubus call netmode matches '{"limit":50}'    match reports, newest first
 #   ubus call netmode set '{"mode":"game"}' / '{"gw":"wan1"}'    (gw locks the game WAN; "auto" frees it)
 #       '{"gw":"wan1","now":true}' switches now and keeps an auto game WAN auto; "by" names the source (default LuCI)
@@ -35,11 +36,14 @@ call)
 		since=$(arg since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
 		{
 			printf '{"points":['
-			[ -s $RUN/hist ] && awk -v s="$since" '$1 > s {
-				dv = ""; n = split(($7 == "-" || $7 == "") ? "" : $7, a, ",")
-				for (i = 1; i <= n; i++) { split(a[i], kv, "="); dv = dv (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
-				printf "%s[%s,%s,%s,%s,\"%s\",\"%s\",{%s}]", (c++ ? "," : ""), $1, $2,
-					($3 == "-" ? "null" : $3), ($4 == "-" ? "null" : $4), $5, $6, dv }' $RUN/hist
+			[ -s $RUN/hist ] && awk -v s="$since" '
+				function obj(f,   o, n, i, a, kv) {  # "ip=bytes,..." -> {"ip":bytes,...}
+					o = ""; n = split((f == "-" || f == "") ? "" : f, a, ",")
+					for (i = 1; i <= n; i++) { split(a[i], kv, "="); o = o (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
+					return "{" o "}"
+				}
+				$1 > s { printf "%s[%s,%s,%s,%s,\"%s\",\"%s\",%s,%s]", (c++ ? "," : ""), $1, $2,
+					($3 == "-" ? "null" : $3), ($4 == "-" ? "null" : $4), $5, $6, obj($7), obj($8) }' $RUN/hist
 			printf '],"probes":['
 			[ -s $RUN/probehist ] && awk -v s="$since" '$1 > s {
 				w = ""; for (i = 2; i <= NF; i++) { split($i, kv, "="); w = w (i > 2 ? "," : "") "\"" kv[1] "\":" (kv[2] == "-" ? "null" : kv[2]) }
@@ -52,10 +56,14 @@ call)
 		touch $RUN/viewer
 		since=$(arg since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
 		printf '{"points":['
-		[ -s $RUN/live ] && awk -v s="$since" '$1 > s && NF >= 4 {
-			dv = ""; n = split(($5 == "-" || $5 == "") ? "" : $5, a, ",")
-			for (i = 1; i <= n; i++) { split(a[i], kv, "="); dv = dv (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
-			printf "%s[%s,%s,\"%s\",\"%s\",{%s}]", (c++ ? "," : ""), $1, ($2 == "-" ? "null" : ($2 == "n" ? "false" : $2)), $3, $4, dv }' $RUN/live
+		[ -s $RUN/live ] && awk -v s="$since" '
+			function obj(f,   o, n, i, a, kv) {  # "ip=bytes,..." -> {"ip":bytes,...}
+				o = ""; n = split((f == "-" || f == "") ? "" : f, a, ",")
+				for (i = 1; i <= n; i++) { split(a[i], kv, "="); o = o (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
+				return "{" o "}"
+			}
+			$1 > s && NF >= 4 { printf "%s[%s,%s,\"%s\",\"%s\",%s,%s]", (c++ ? "," : ""), $1,
+				($2 == "-" ? "null" : ($2 == "n" ? "false" : $2)), $3, $4, obj($5), obj($6) }' $RUN/live
 		echo ']}'
 		;;
 	matches)

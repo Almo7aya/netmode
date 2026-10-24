@@ -41,6 +41,13 @@ return view.extend({
 		var ifaces = uci.sections('mwan3', 'interface').filter(function(s) { return s.enabled != '0'; })
 			.map(function(s) { return s['.name']; });
 		var wans = L.toArray(uci.get('netmode', 'main', 'wans'));
+		// display names ('wan1:New router') of the saved settings: "New router (wan1)" in the WAN pickers
+		var labels = {};
+		L.toArray(uci.get('netmode', 'main', 'label')).forEach(function(l) {
+			var i = l.indexOf(':');
+			if (i > 0) labels[l.substr(0, i)] = l.substr(i + 1);
+		});
+		var wname = function(w) { return labels[w] ? '%s (%s)'.format(labels[w], w) : w; };
 		var m, s, o;
 
 		m = new form.Map('netmode', _('Netmode'),
@@ -86,7 +93,7 @@ return view.extend({
 		o = s.taboption('general', form.ListValue, 'gw_mode', _('Game WAN'),
 			_('Auto picks the best candidate between matches. Picking a WAN locks it and applies at once.'));
 		o.value('auto', _('Auto (best candidate)'));
-		wans.forEach(function(w) { o.value(w, w); });
+		wans.forEach(function(w) { o.value(w, wname(w)); });
 		o.default = 'auto';
 
 		o = s.taboption('general', form.Flag, 'game_all_traffic', _('All of the device\'s traffic on the game WAN'),
@@ -106,11 +113,19 @@ return view.extend({
 		o = s.taboption('general', form.MultiValue, 'wans', _('WANs'),
 			_('Every WAN netmode balances and can use as the game WAN (empty: every mwan3 interface). Changing this rebuilds ' +
 			  'the mwan3 rules (a short interruption for everyone).'));
-		ifaces.forEach(function(w) { o.value(w, w); });
+		ifaces.forEach(function(w) { o.value(w, wname(w)); });
+
+		o = s.taboption('general', form.DynamicList, 'label', _('WAN names'),
+			_('A display name per WAN as <code>wan:name</code>, e.g. <code>wan1:New router</code>, used on the dashboard, in the match ' +
+			  'reports and in Telegram messages; unnamed WANs show their interface name.'));
+		o.placeholder = 'wan1:New router';
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Za-z0-9_]+:[^"\\]*[^"\\\s][^"\\]*$/.test(value) ? true : _('Use wan:name, e.g. wan1:New router (no quotes or backslashes)');
+		};
 
 		o = s.taboption('general', form.MultiValue, 'game_only', _('Game-only WANs'),
 			_('WANs (e.g. a relay tunnel) that can be the game WAN but never carry anyone else\'s traffic.'));
-		wans.forEach(function(w) { o.value(w, w); });
+		wans.forEach(function(w) { o.value(w, wname(w)); });
 
 		o = s.taboption('general', form.DynamicList, 'depends', _('Depends on'),
 			_('<code>relay:wan1,wan2</code>: while relay is the game WAN, everyone else also stays off wan1 and wan2 ' +
@@ -158,7 +173,7 @@ return view.extend({
 
 		o = s.taboption('select', form.MultiValue, 'cands', _('Auto candidates'),
 			_('The WANs auto mode chooses from (empty: all of them).'));
-		wans.forEach(function(w) { o.value(w, w); });
+		wans.forEach(function(w) { o.value(w, wname(w)); });
 
 		o = s.taboption('select', form.Value, 'probe_every', _('Probe every (s)'),
 			_('10 pings through every WAN to the probe target.'));

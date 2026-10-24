@@ -1,7 +1,7 @@
 #!/bin/sh
 # netmode-sampler — one sample per second for the live graphs: a ping through the game WAN to the probe target
-# and each gaming device's UDP upload. Keeps the last 15 minutes in /var/run/netmode/live:
-#   "ts ping_ms|-|n state game_wan ip=bytes,ip=bytes,..."   (-: no reply, n: not measured)
+# and each gaming device's UDP upload and download. Keeps the last 15 minutes in /var/run/netmode/live:
+#   "ts ping_ms|-|n state game_wan ip=up_bytes,... ip=down_bytes,..."   (-: no reply, n: not measured)
 # The ping costs mobile data, so it only runs while a dashboard is open (rpcd touches /var/run/netmode/viewer);
 # the upload numbers come from conntrack and are always recorded.
 # Each ping gets 2 s to answer (a congested WAN can be slower than 1 s without losing anything), so a second is
@@ -44,7 +44,7 @@ while true; do
 		eval "pp_$slot=n"
 	fi
 	set -- $(udp_delta "$GAME_IPS" $RUN/live.flows)
-	eval "row_$slot=\"$now ${state:-all} ${gw:--} ${4:--}\""
+	eval "row_$slot=\"$now ${state:-all} ${gw:--} ${4:--} ${5:--}\""
 	sleep 1
 
 	# the slot started two seconds ago has had its 2 s: write its line
@@ -60,7 +60,7 @@ while true; do
 		p=${p:--}
 	fi
 	set -- $orow
-	echo "$1 $p $2 $3 $4" >> $RUN/live
+	echo "$1 $p $2 $3 $4 $5" >> $RUN/live
 	eval "row_$old=''"
 	[ $((n % 60)) = 0 ] && { tail -n $KEEP $RUN/live > $RUN/live.tmp && mv $RUN/live.tmp $RUN/live; }
 done

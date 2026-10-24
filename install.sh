@@ -69,5 +69,7 @@ sleep 2
 ubus list netmode >/dev/null 2>&1 || { /etc/init.d/rpcd restart; sleep 2; }
 rm -f /tmp/luci-indexcache*
 rm -rf /tmp/luci-modulecache
+# LuCI tags its JS modules (?v=...) with the package database's mtime: bump it so browsers load the new pages
+for f in /lib/apk/db/installed /usr/lib/opkg/status; do [ -f "$f" ] && { touch "$f"; break; }; done
 echo "netmode installed."
 netmode status

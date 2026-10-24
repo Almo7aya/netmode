@@ -18,10 +18,11 @@ var callSetGw = rpc.declare({ object: 'netmode', method: 'set', params: [ 'gw' ]
 
 var SVGNS = 'http://www.w3.org/2000/svg';
 
-var DARK = '--nm-c1:#3987e5;--nm-c2:#d95926;--nm-c3:#199e70;--nm-c4:#c98500;--nm-c5:#d55181;' +
+var DARK = '--nm-c1:#3987e5;--nm-c2:#d95926;--nm-c3:#199e70;--nm-c4:#c98500;--nm-c5:#d55181;--nm-c6:#008300;--nm-c7:#9085e9;--nm-c8:#e66767;' +
 	'--nm-band:rgba(160,160,160,.11);--nm-grid:rgba(255,255,255,.08);--nm-axis:rgba(255,255,255,.22)';
 var CSS = [
-	'.nm{--nm-c1:#2a78d6;--nm-c2:#eb6834;--nm-c3:#1baf7a;--nm-c4:#eda100;--nm-c5:#e87ba4;--nm-crit:#d03b3b;--nm-good:#0ca30c;',
+	'.nm{--nm-c1:#2a78d6;--nm-c2:#eb6834;--nm-c3:#1baf7a;--nm-c4:#eda100;--nm-c5:#e87ba4;--nm-c6:#008300;--nm-c7:#4a3aa7;--nm-c8:#e34948;',
+	'--nm-crit:#d03b3b;--nm-good:#0ca30c;',
 	'--nm-band:rgba(120,120,120,.12);--nm-grid:rgba(0,0,0,.08);--nm-axis:rgba(0,0,0,.25);',
 	'--nm-line:rgba(128,128,128,.3);--nm-fill:rgba(128,128,128,.06);font:13px system-ui,-apple-system,"Segoe UI",sans-serif}',
 	':root[data-darkmode="true"] .nm{' + DARK + '}',
@@ -129,7 +130,7 @@ var hoverHide = function() {};
 return baseclass.extend({
 	S: S,
 	hhmm: hhmm,
-	color: function(i) { return 'var(--nm-c' + ((i % 5) + 1) + ')'; },
+	color: function(i) { return 'var(--nm-c' + ((i % 8) + 1) + ')'; },
 
 	status: function() { return L.resolveDefault(callStatus(), { running: false }); },
 	history: function(since) { return L.resolveDefault(callHistory(since || 0), { points: [], probes: [] }); },
@@ -144,6 +145,9 @@ return baseclass.extend({
 
 	devName: function(d) { return d.name || d.ip; },
 
+	// a WAN by its display name (the label setting), else its interface name
+	wl: function(st, w) { return (st && st.labels && st.labels[w]) || w; },
+
 	dur: function(s) {
 		s = Math.max(0, Math.round(s));
 		return s < 3600 ? Math.floor(s / 60) + ':' + pad(s % 60) : Math.floor(s / 3600) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60);
@@ -151,20 +155,21 @@ return baseclass.extend({
 
 	badge: function(st) {
 		return st.state == 'game'
-			? E('span', { 'class': 'nm-badge', 'style': 'background:#c0392b' }, [ '🎮 ' + _('Game mode') + ' · ' + st.gw ])
+			? E('span', { 'class': 'nm-badge', 'style': 'background:#c0392b' }, [ '🎮 ' + _('Game mode') + ' · ' + this.wl(st, st.gw) ])
 			: E('span', { 'class': 'nm-badge', 'style': 'background:#27ae60' }, [ '🚀 ' + _('All WANs') ]);
 	},
 
 	describe: function(st) {
 		var names = (st.devices || []).map(this.devName).join(', ') || _('the gaming devices');
 		return st.state == 'game'
-			? _('Game WAN %s is reserved for %s; everyone else uses all the other WANs.').format(st.gw, names)
-			: _('Everyone uses every WAN; the game traffic of %s stays on %s.').format(names, st.gw);
+			? _('Game WAN %s is reserved for %s; everyone else uses all the other WANs.').format(this.wl(st, st.gw), names)
+			: _('Everyone uses every WAN; the game traffic of %s stays on %s.').format(names, this.wl(st, st.gw));
 	},
 
 	/* Mode and game-WAN buttons. refresh() is called after a change is applied. */
 	controls: function(st, refresh) {
-		var probe = {}, all = [];
+		var probe = {}, all = [], wl = this.wl.bind(this, st);
+		var cands = (st.cands || []).map(wl).join(', ');
 		(st.probe || []).forEach(function(p) { probe[p.wan] = p; });
 
 		var btn = function(label, on, title, call, extra) {
@@ -189,19 +194,19 @@ return baseclass.extend({
 		]);
 
 		var gws = E('div', { 'class': 'nm-seg' }, [
-			btn([ _('Auto'), st.gw_mode == 'auto' ? E('small', {}, [ st.gw ]) : '' ], st.gw_mode == 'auto',
-				_('Best of %s, picked between matches').format((st.cands || []).join(', ')), function() { return callSetGw('auto'); })
+			btn([ _('Auto'), st.gw_mode == 'auto' ? E('small', {}, [ wl(st.gw) ]) : '' ], st.gw_mode == 'auto',
+				_('Best of %s, picked between matches').format(cands), function() { return callSetGw('auto'); })
 		].concat((st.wans || []).map(function(w) {
 			var p = probe[w], ms = p ? (p.p20 != null ? p.p20 + ' ms' : _('no reply')) : '';
-			return btn([ (w == st.gw ? '● ' : '') + w, ms ? E('small', {}, [ ms ]) : '' ], st.gw_mode == w,
-				_('Lock the game WAN to %s now').format(w), function() { return callSetGw(w); }, w == st.gw ? ' cur' : '');
+			return btn([ (w == st.gw ? '● ' : '') + wl(w), ms ? E('small', {}, [ ms ]) : '' ], st.gw_mode == w,
+				_('Lock the game WAN to %s now').format(wl(w) == w ? w : wl(w) + ' (' + w + ')'), function() { return callSetGw(w); }, w == st.gw ? ' cur' : '');
 		})));
 
 		var note = E('div', { 'class': 'nm-note' }, [
 			'● ' + _('current game WAN.') + ' ' +
 			(st.move_flows ? _('Picking a WAN locks it and moves running matches there now (the game freezes ~1 s).')
 			               : _('Picking a WAN locks it for new connections; running matches stay where they are.')) + ' ' +
-			_('Auto picks the best of %s between matches. WAN pings: 20th percentile of 10 pings.').format((st.cands || []).join(', '))
+			_('Auto picks the best of %s between matches. WAN pings: 20th percentile of 10 pings.').format(cands)
 		]);
 
 		return { modes: modes, gws: gws, note: note };
@@ -209,8 +214,8 @@ return baseclass.extend({
 
 	/* A time-series chart drawn in a shared time frame (so several charts line up under one crosshair).
 	 * sp: { W, H, frame: { L, R, t0, t1 }, unit, zero (y axis from 0), robust (rare spikes above the scale are clipped
-	 *       and marked), minSpan (smallest y range), thresh: { v, label },
-	 *       series: [{ label, color, pts: [[ts, v|null]], area, markers, tol (s, hover snapping) }],
+	 *       and marked), minSpan (smallest y range), thresh: { v, label, dash } or a list of them (reference lines),
+	 *       series: [{ label, color, pts: [[ts, v|null]], area, markers, dash, tol (s, hover snapping) }],
 	 *       bands: [[ts0, ts1]] (shaded), marks: [{ ts, label }] (vertical markers), loss: [ts] (red ticks on top) }
 	 * returns { svg, show(ts), hide() } */
 	chart: function(sp) {
@@ -226,7 +231,8 @@ return baseclass.extend({
 			var cap = Math.max(q(0.98) * 1.25, q(0.5) + (sp.minSpan || 20) * 1.5);
 			if (vmax > cap) hi = cap;
 		}
-		if (sp.thresh) hi = Math.max(hi, sp.thresh.v * 1.25);
+		var threshs = sp.thresh ? [].concat(sp.thresh) : [];
+		threshs.forEach(function(t) { hi = Math.max(hi, t.v * 1.25); });
 		var step = niceStep(Math.max(hi - lo, sp.minSpan || 1) / 4);
 		var y0 = sp.zero ? 0 : Math.max(0, Math.floor((lo - step * 0.3) / step) * step);
 		var y1 = Math.max(y0 + step, Math.ceil((hi + step * 0.1) / step) * step);
@@ -261,12 +267,18 @@ return baseclass.extend({
 				lastLabel = xx;
 			}
 		});
-		if (sp.thresh) {
-			svg.appendChild(S('line', { 'x1': f.L, 'x2': W - f.R, 'y1': y(sp.thresh.v), 'y2': y(sp.thresh.v), 'stroke': 'currentColor',
-				'stroke-opacity': 0.5, 'stroke-dasharray': '5 4' }));
-			svg.appendChild(S('text', { 'x': W - f.R, 'y': y(sp.thresh.v) - 5, 'text-anchor': 'end', 'fill': 'currentColor',
-				'fill-opacity': 0.65, 'font-size': 11 }, [ sp.thresh.label ]));
-		}
+		// reference lines, labelled (when they have a label) above the line at the right end, or at the left end when
+		// that would touch another label
+		var labelYs = [];
+		threshs.forEach(function(t) {
+			var ty = y(t.v), left = labelYs.some(function(o) { return Math.abs(o - ty) < 14; });
+			svg.appendChild(S('line', { 'x1': f.L, 'x2': W - f.R, 'y1': ty, 'y2': ty, 'stroke': 'currentColor',
+				'stroke-opacity': 0.5, 'stroke-dasharray': t.dash || '5 4' }));
+			if (!t.label) return;
+			svg.appendChild(S('text', { 'x': left ? f.L + 6 : W - f.R, 'y': ty - 5, 'text-anchor': left ? 'start' : 'end', 'fill': 'currentColor',
+				'fill-opacity': 0.65, 'font-size': 11 }, [ t.label ]));
+			if (!left) labelYs.push(ty);
+		});
 
 		// series: area wash, 2px line, optional point markers; gaps where a value is missing
 		sp.series.forEach(function(s) {
@@ -284,7 +296,7 @@ return baseclass.extend({
 					svg.appendChild(S('path', { 'd': d + 'L' + seg[seg.length - 1][0].toFixed(1) + ',' + (H - bottom) + 'L' + seg[0][0].toFixed(1) + ',' + (H - bottom) + 'Z',
 						'fill': s.color, 'fill-opacity': 0.1, 'stroke': 'none' }));
 				svg.appendChild(S('path', { 'd': d, 'fill': 'none', 'stroke': s.color, 'stroke-width': s.width || 2, 'stroke-opacity': s.opacity || null,
-					'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+					'stroke-dasharray': s.dash || null, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
 				if (s.markers || (seg.length == 1 && !s.opacity))
 					seg.forEach(function(pt) { svg.appendChild(S('circle', { 'cx': pt[0], 'cy': pt[1], 'r': 3, 'fill': s.color, 'stroke': ring, 'stroke-width': 1.5 })); });
 			});
@@ -442,14 +454,15 @@ return baseclass.extend({
 				d.live = d.live.filter(function(p) { return p[0] > d.liveLast - LIVE_KEEP; });
 			}
 		};
-		// rows in one shape for both sources: { ts, ping, lossPct, state, gw, dev: { ip: KB/s } }
+		// rows in one shape for both sources: { ts, ping, lossPct, state, gw, dev: { ip: upload KB/s }, down: { ip: KB/s } }
 		var rows = function(useLive) {
 			var iv = d.st.interval || 10, liveOn = d.st.ping != null;
 			var kb = function(o, div) { var r = {}; for (var k in (o || {})) r[k] = o[k] / div / 1024; return r; };
 			return useLive
 				// ping null = no reply (loss), false = not measured (nobody was watching)
-				? d.live.map(function(p) { return { ts: p[0], ping: p[1] === false ? null : p[1], lossPct: liveOn && p[1] === null ? 100 : 0, state: p[2], gw: p[3], dev: kb(p[4], 1) }; })
-				: d.hist.map(function(p) { return { ts: p[0], ping: p[2], lossPct: p[3], state: p[4], gw: p[5], dev: kb(p[6], iv) }; });
+				? d.live.map(function(p) { return { ts: p[0], ping: p[1] === false ? null : p[1], lossPct: liveOn && p[1] === null ? 100 : 0, state: p[2], gw: p[3],
+					dev: kb(p[4], 1), down: kb(p[5], 1) }; })
+				: d.hist.map(function(p) { return { ts: p[0], ping: p[2], lossPct: p[3], state: p[4], gw: p[5], dev: kb(p[6], iv), down: kb(p[7], iv) }; });
 		};
 		merge(res[0], res[1], res[2]);
 
@@ -490,7 +503,7 @@ return baseclass.extend({
 				bar.replaceChildren(E('em', {}, [ _('netmode is not running (/etc/init.d/netmode start)') ]));
 				return;
 			}
-			var key = JSON.stringify([ st.mode, st.state, st.gw, st.gw_mode, st.wans, st.cands, st.move_flows, st.probe, st.target,
+			var key = JSON.stringify([ st.mode, st.state, st.gw, st.gw_mode, st.wans, st.labels, st.cands, st.move_flows, st.probe, st.target,
 				(st.devices || []).map(function(x) { return [ x.ip, x.name, x.playing ]; }) ]);
 			if (key == d.key) return;
 			d.key = key;
@@ -510,7 +523,7 @@ return baseclass.extend({
 					E('div', {}, [ nm.badge(st), E('div', { 'class': 'nm-desc' }, [ nm.describe(st) ]),
 						E('div', { 'class': 'nm-desc' }, [ _('Mode %s').format(st.mode) + ' · ' +
 							(playing.length ? _('%s playing').format(playing.map(nm.devName).join(', ')) : _('nobody playing')) + ' · ' +
-							_('game WAN %s').format(st.gw_mode) ]) ]),
+							_('game WAN %s').format(st.gw_mode == 'auto' ? _('auto') : _('locked to %s').format(nm.wl(st, st.gw_mode))) ]) ]),
 					E('div', {}, [ E('div', { 'class': 'nm-label' }, [ _('Mode') ]), c.modes, E('div', { 'class': 'nm-label' }, [ _('Game WAN') ]), c.gws, c.note ])
 				]));
 			}
@@ -519,22 +532,24 @@ return baseclass.extend({
 		var drawTiles = function() {
 			var st = d.st;
 			if (!st.running) { tiles.replaceChildren(); return; }
-			var lv = rows(true), now = d.liveLast || st.ts;
+			var lv = rows(true), now = d.liveLast || st.ts, gw = nm.wl(st, st.gw);
 			var last = lv.length && now - lv[lv.length - 1].ts <= 3 ? lv[lv.length - 1] : null;
 			var s = stats(lv.filter(function(r) { return r.ts > now - 60; })), p = st.ping;
-			var r3 = lv.filter(function(r) { return r.ts > now - 3; });
-			var rate = function(ip) { return r3.length ? r3.reduce(function(a, r) { return a + (r.dev[ip] || 0); }, 0) / r3.length : null; };
-			var devs = st.devices || [], total = devs.reduce(function(a, x) { return a + (rate(x.ip) || 0); }, 0);
+			// upload: the last 10 s on average, like the graph and the game detection
+			var r10 = lv.filter(function(r) { return r.ts > now - 10; });
+			var rate = function(ip, dir) { return r10.length ? r10.reduce(function(a, r) { return a + (r[dir || 'dev'][ip] || 0); }, 0) / r10.length : null; };
+			var devs = st.devices || [];
+			var total = devs.reduce(function(a, x) { return a + (rate(x.ip) || 0); }, 0), totalDown = devs.reduce(function(a, x) { return a + (rate(x.ip, 'down') || 0); }, 0);
 			var pingNow = last && p != null ? (last.ping != null ? String(Math.round(last.ping)) : _('lost')) : (p && p.avg != null ? String(Math.round(p.avg)) : '—');
 			var match = st.match
-				? tile(_('Match'), nm.dur(now - st.match.start), '', [ _('since %s · on %s').format(nm.hhmm(st.match.start), st.gw) ])
+				? tile(_('Match'), nm.dur(now - st.match.start), '', [ _('since %s · on %s').format(nm.hhmm(st.match.start), gw) ])
 				: tile(_('Match'), '—', '', [ _('no match running · '), E('a', { 'href': L.url('admin/services/netmode/matches') }, [ _('reports') ]) ]);
-			var devTile = tile(_('Gaming devices'), kbs(total), 'KB/s', devs.length ? devs.map(function(x) {
-				return E('div', {}, [ nm.devName(x) + ': ' + kbs(rate(x.ip)) + ' KB/s' + (x.playing ? ' · ' + _('playing') : '') ]);
+			var devTile = tile(_('Gaming devices · UDP'), '↑ ' + kbs(total) + '  ↓ ' + kbs(totalDown), 'KB/s', devs.length ? devs.map(function(x) {
+				return E('div', {}, [ nm.devName(x) + ': ↑ ' + kbs(rate(x.ip)) + ' · ↓ ' + kbs(rate(x.ip, 'down')) + ' KB/s' + (x.playing ? ' · ' + _('playing') : '') ]);
 			}) : [ E('a', { 'href': L.url('admin/services/netmode/settings') }, [ _('pick your gaming devices in Settings') ]) ]);
 			if (kiosk)
 				tiles.replaceChildren(
-					tile(_('Ping now'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms', [ _('via %s · 1 ping per second').format(st.gw) ]),
+					tile(_('Ping now'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms', [ _('via %s · 1 ping per second').format(gw) ]),
 					tile(_('Avg · 60 s'), s.avg != null ? String(Math.round(s.avg)) : '—', s.avg != null ? 'ms' : '', [ _('10 s median on the graph') ]),
 					tile(_('Jitter · loss · 60 s'), s.jitter != null ? s.jitter.toFixed(1) : '—', 'ms', [ _('loss %s %%').format(s.loss != null ? s.loss.toFixed(1) : '—') ]),
 					devTile, match);
@@ -542,7 +557,7 @@ return baseclass.extend({
 				tiles.replaceChildren(
 					tile(_('Game WAN ping'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms',
 						[ s.avg != null ? _('last 60 s: avg %d ms · jitter %.1f ms · loss %d %%').format(Math.round(s.avg), s.jitter || 0, Math.round(s.loss)) : '',
-						  E('div', {}, [ _('via %s to %s').format(st.gw, st.target) ]) ]),
+						  E('div', {}, [ _('via %s to %s').format(gw, st.target) ]) ]),
 					devTile, match,
 					st.probe_kind == 'region' && st.region
 						? tile(_('Game region'), st.region.name, '', [ (st.region.provider == 'gcp' ? 'Google Cloud ' : 'AWS ') + st.region.id +
@@ -584,7 +599,7 @@ return baseclass.extend({
 				var next = rs[i + 1];
 				if (r.state == 'game' && start == null) start = r.ts - step;
 				if (r.state == 'game' && (!next || next.state != 'game')) { bands.push([ start, r.ts ]); start = null; }
-				if (i > 0 && r.gw != rs[i - 1].gw) marks.push({ ts: r.ts, label: '→ ' + r.gw });
+				if (i > 0 && r.gw != rs[i - 1].gw) marks.push({ ts: r.ts, label: '→ ' + nm.wl(st, r.gw) });
 			});
 			var loss = rs.filter(function(r) { return r.lossPct > 0; }).map(function(r) { return r.ts; });
 			var frame = function(sz) { return { L: 52, R: 16, t0: t0, t1: t1 }; };
@@ -620,18 +635,61 @@ return baseclass.extend({
 			cells.ping.plot.replaceChildren(c1.svg);
 			charts.push(c1);
 
-			// gaming devices' UDP upload
-			var lastDev = rs[rs.length - 1].dev, totalNow = devs.reduce(function(a, ip) { return a + (lastDev[ip] || 0); }, 0);
-			head(cells.udp, _('Gaming devices UDP upload'), _('KB/s · DNS, NTP, QUIC and LAN traffic not counted'), kbs(totalNow), 'KB/s');
-			cells.udp.legend.replaceChildren(nm.legend(devs.map(function(ip, i) { return [ nm.lineKey(nm.color(i)), names[ip] || ip, kbs(lastDev[ip]) + ' KB/s' ]; })
-				.concat([ [ nm.lineKey('currentColor', '5 4'), _('game mode threshold') ] ])));
-			sz = size(cells.udp, 160);
-			var c2 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'KB/s', zero: true, minSpan: 1, bands: bands,
-				thresh: { v: (st.thresh || 0) / iv / 1024, label: _('game mode threshold') },
-				series: devs.map(function(ip, i) {
-					return { label: names[ip] || ip, color: nm.color(i), area: devs.length == 1, tol: step * 1.5,
-						pts: rs.map(function(r) { return [ r.ts, r.dev[ip] != null ? r.dev[ip] : null ]; }) };
-				}) });
+			// gaming devices' UDP upload and download: the average over the last 10 s, the window game detection uses (the
+			// 1 s values are bursts between 0 and ~90 KB/s, so they are only in the tooltip); the game mode and match
+			// levels are upload levels. One device: upload and download in two colours; several: a colour per device,
+			// download dashed.
+			var avg = { dev: {}, down: {} }, win = useLive ? all.filter(function(r) { return r.ts > t0 - 10; }) : null;
+			devs.forEach(function(ip) { avg.dev[ip] = {}; avg.down[ip] = {}; });
+			[ 'dev', 'down' ].forEach(function(dir) {
+				if (useLive) {
+					win.forEach(function(r, i) {
+						devs.forEach(function(ip) {
+							var sum = 0, n = 0;
+							for (var k = i; k >= 0 && win[k].ts > r.ts - 10; k--) { sum += win[k][dir][ip] || 0; n++; }
+							avg[dir][ip][r.ts] = sum / n;
+						});
+					});
+				}
+				else rs.forEach(function(r) { devs.forEach(function(ip) { avg[dir][ip][r.ts] = r[dir][ip] || 0; }); });
+			});
+			var one = devs.length == 1, upColor = function(i) { return nm.color(i); }, downColor = function(i) { return nm.color(one ? 1 : i); };
+			var gmKB = (st.thresh || 0) / iv / 1024, mKB = (st.match_thresh || 0) / iv / 1024, tLast = rs[rs.length - 1].ts;
+			var upNow = {}, downNow = {}, totalUp = 0, totalDown = 0, topNow = 0;
+			devs.forEach(function(ip) {
+				upNow[ip] = avg.dev[ip][tLast] || 0; downNow[ip] = avg.down[ip][tLast] || 0;
+				totalUp += upNow[ip]; totalDown += downNow[ip]; topNow = Math.max(topNow, upNow[ip]);
+			});
+			// unlabelled in the plot (the labels sat on the newest data): the legend names both dash patterns
+			var levels = [ { v: gmKB, dash: '2 3' } ];
+			if (mKB > gmKB) levels.push({ v: mKB, dash: '7 4' });
+			var mstart = st.match && st.match.start > t0 ? [ { ts: st.match.start, label: _('match start') } ] : [];
+			var udpSeries = [];
+			devs.forEach(function(ip, i) {
+				var nmd = one ? '' : (names[ip] || ip) + ' ';
+				udpSeries.push({ label: nmd + _('download'), color: downColor(i), dash: one ? null : '6 3', tol: step * 1.5,
+					pts: rs.map(function(r) { return [ r.ts, avg.down[ip][r.ts] ]; }) });
+				udpSeries.push({ label: nmd + _('upload'), color: upColor(i), area: one, tol: step * 1.5,
+					pts: rs.map(function(r) { return [ r.ts, avg.dev[ip][r.ts] ]; }) });
+			});
+			sz = size(cells.udp, 170);
+			var c2 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'KB/s', zero: true, robust: true, minSpan: 2, bands: bands,
+				marks: mstart, thresh: levels, series: udpSeries });
+			head(cells.udp, _('Gaming devices UDP traffic'), _('KB/s · 10 s average · game detection counts the upload · DNS, NTP, QUIC and LAN not counted'),
+				'↑ ' + kbs(totalUp) + '  ↓ ' + kbs(totalDown), 'KB/s',
+				mKB > gmKB && topNow >= mKB ? _('upload at match level') : topNow >= gmKB ? _('upload at game mode level (lobby, loading)') : _('upload below the game mode level'));
+			var uleg = [];
+			devs.forEach(function(ip, i) {
+				var nmd = one ? '' : (names[ip] || ip) + ' ';
+				uleg.push([ nm.lineKey(upColor(i)), nmd + '↑ ' + _('upload'), kbs(upNow[ip]) + ' KB/s' ]);
+				uleg.push([ nm.lineKey(downColor(i), one ? null : '6 3'), nmd + '↓ ' + _('download'), kbs(downNow[ip]) + ' KB/s' ]);
+			});
+			uleg.push([ nm.lineKey('currentColor', '2 3'), _('game mode level: upload ≥ %s KB/s').format(kbs(gmKB)) ]);
+			if (mKB > gmKB) uleg.push([ nm.lineKey('currentColor', '7 4'), _('match level: upload ≥ %s KB/s').format(kbs(mKB)) ]);
+			if (mstart.length) uleg.push([ nm.markKey(), _('match start') ]);
+			if (bands.length) uleg.push([ nm.bandKey(), _('game mode') ]);
+			if (c2.clipped) uleg.push([ nm.spikeKey(), _('burst above the scale') ]);
+			cells.udp.legend.replaceChildren(nm.legend(uleg));
 			cells.udp.plot.replaceChildren(c2.svg);
 			charts.push(c2);
 
@@ -642,12 +700,12 @@ return baseclass.extend({
 					? _('ms · round trip to the game region (%s) through each WAN, every probe round').format(st.region.name)
 					: _('ms · 20th percentile of 10 pings per WAN to %s, every probe round').format(st.target), '', '');
 				cells.wans.legend.replaceChildren(nm.legend(wans.map(function(w, i) {
-					return [ nm.lineKey(nm.color(i)), w + (w == st.gw ? ' (' + _('game WAN') + ')' : ''), lastProbe[w] != null ? lastProbe[w] + ' ms' : _('no reply') ];
+					return [ nm.lineKey(nm.color(i)), nm.wl(st, w) + (w == st.gw ? ' (' + _('game WAN') + ')' : ''), lastProbe[w] != null ? lastProbe[w] + ' ms' : _('no reply') ];
 				})));
 				sz = size(cells.wans, 200);
 				var c3 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'ms', robust: true, minSpan: 20, bands: bands, marks: marks,
 					series: wans.map(function(w, i) {
-						return { label: w, color: nm.color(i), markers: true, tol: 45, pts: probes.map(function(p) { return [ p[0], p[1][w] != null ? p[1][w] : null ]; }) };
+						return { label: nm.wl(st, w), color: nm.color(i), markers: true, tol: 45, pts: probes.map(function(p) { return [ p[0], p[1][w] != null ? p[1][w] : null ]; }) };
 					}) });
 				cells.wans.plot.replaceChildren(c3.svg);
 				charts.push(c3);
@@ -659,14 +717,19 @@ return baseclass.extend({
 			var byTs = {};
 			rs.forEach(function(r) { byTs[r.ts] = r; });
 			nm.hoverGroup(charts, rs.map(function(r) { return r.ts; }), function(ts) {
-				var r = byTs[ts], out = [ E('div', { 'class': 'm' }, [ nm.hhmm(ts, true) + ' · ' + (r.state == 'game' ? _('game mode') : _('all WANs')) + ' · ' + _('game WAN %s').format(r.gw) ]) ];
+				var r = byTs[ts], out = [ E('div', { 'class': 'm' }, [ nm.hhmm(ts, true) + ' · ' + (r.state == 'game' ? _('game mode') : _('all WANs')) + ' · ' + _('game WAN %s').format(nm.wl(st, r.gw)) ]) ];
 				out.push(nm.tipRow(r.ping != null ? r.ping.toFixed(1) + ' ms' : _('no reply'), _('ping'), nm.color(0)));
 				if (useLive && med[ts] != null) out.push(nm.tipRow(Math.round(med[ts]) + ' ms', _('10 s median'), nm.color(0)));
 				if (!useLive) out.push(nm.tipRow(r.lossPct != null ? r.lossPct + ' %' : '—', _('packet loss')));
-				devs.forEach(function(ip, i) { out.push(nm.tipRow(kbs(r.dev[ip]) + ' KB/s', names[ip] || ip, nm.color(i))); });
+				devs.forEach(function(ip, i) {
+					var nmd = one ? '' : (names[ip] || ip) + ' ';
+					out.push(nm.tipRow(kbs(avg.dev[ip][ts]) + ' KB/s', nmd + '↑ ' + _('upload') + (useLive ? ', ' + _('10 s average') : ''), upColor(i)));
+					out.push(nm.tipRow(kbs(avg.down[ip][ts]) + ' KB/s', nmd + '↓ ' + _('download') + (useLive ? ', ' + _('10 s average') : ''), downColor(i)));
+					if (useLive) out.push(nm.tipRow('↑ ' + kbs(r.dev[ip] || 0) + ' · ↓ ' + kbs(r.down[ip] || 0) + ' KB/s', _('in that second')));
+				});
 				var pr = null;
 				probes.forEach(function(p) { if (Math.abs(p[0] - ts) <= 90 && (!pr || Math.abs(p[0] - ts) < Math.abs(pr[0] - ts))) pr = p; });
-				if (pr) wans.forEach(function(w, i) { out.push(nm.tipRow(pr[1][w] != null ? pr[1][w] + ' ms' : _('no reply'), w, nm.color(i))); });
+				if (pr) wans.forEach(function(w, i) { out.push(nm.tipRow(pr[1][w] != null ? pr[1][w] + ' ms' : _('no reply'), nm.wl(st, w), nm.color(i))); });
 				return out;
 			}, vs);
 		};

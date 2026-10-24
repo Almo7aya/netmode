@@ -13,6 +13,8 @@ config netmode 'main'
 	# list cands 'wan'
 	# load-balancing weight per WAN, 'wan:weight' (default 1)
 	# list weight 'wan:2'
+	# display names for the dashboard, match reports and Telegram, 'wan:name' (default: the interface name)
+	# list label 'wan:Fibre'
 	# move running matches when the game WAN changes (the game freezes ~1 s)
 	option move_flows '1'
 	# 0: only the gaming devices' game UDP uses the game WAN | 1: all their traffic (one public IP for the game's
