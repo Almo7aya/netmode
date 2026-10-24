@@ -188,14 +188,19 @@ return view.extend({
 		};
 
 		o = s.taboption('notify', form.Value, 'telegram_chat', _('Chat id'),
-			_('A user id, a group id (negative, e.g. -1001234567890) or @channelname.'));
+			_('Filled in by pairing: add your @username under Allowed users, save, then send /start to the bot in a private ' +
+			  'chat. Or enter a user id, a group id (negative) or @channelname yourself.'));
 		o.validate = function(section_id, value) {
 			return !value || /^(-?[0-9]+|@[A-Za-z0-9_]{5,})$/.test(value) ? true : _('A number (negative for groups) or @channelname');
 		};
 
 		o = s.taboption('notify', form.DynamicList, 'telegram_user', _('Allowed users'),
-			_('Telegram user ids that may use the commands and buttons. Empty: anyone in the chat.'));
-		o.datatype = 'uinteger';
+			_('Telegram @usernames or numeric user ids that may use the commands and buttons (and pair a private chat). ' +
+			  'Empty: anyone in the chat.'));
+		o.placeholder = '@username';
+		o.validate = function(section_id, value) {
+			return !value || /^(@[A-Za-z0-9_]{4,32}|[0-9]+)$/.test(value) ? true : _('An @username or a numeric user id');
+		};
 
 		o = s.taboption('notify', form.MultiValue, 'notify', _('Send'));
 		o.value('mode', _('Game mode on / off'));

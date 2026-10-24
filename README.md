@@ -45,12 +45,13 @@ plentiful but each one's latency collapses as soon as somebody downloads on it.
 ## Telegram bot
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
-2. Start a chat with the bot (or add it to a group) and get the chat id (e.g. from
-   `https://api.telegram.org/bot<token>/getUpdates` after sending it a message; group ids are negative).
-3. In **Services → Netmode → Settings → Notifications**, switch the bot on, enter the token and chat id, choose the
-   events (and, optionally, the user ids allowed to control it), save, and press **Send test message**.
+2. In **Services → Netmode → Settings → Notifications**, switch the bot on, enter the token, add your Telegram
+   `@username` under **Allowed users**, choose the events and save.
+3. Open a private chat with your bot and send `/start`. The bot pairs with you: that chat becomes the one it
+   talks to, and your numeric user id is added to the allowed users (usernames can change, ids can't).
 
-The bot (`netmode-bot`, ucode) only answers in that chat. It long-polls Telegram, so it needs no open port and
+Instead of pairing you can enter a chat id yourself (a user id, a negative group id or `@channelname`).
+The bot (`netmode-bot`, ucode) only answers in that chat, to the allowed users. It long-polls Telegram, so it needs no open port and
 costs one small request every ~50 s while idle.
 
 | Command | |
@@ -160,8 +161,8 @@ netmode matches [n]         the last n match reports
 | `min_match` / `keep_matches` | `60` / `200` | match reports |
 | `match_switch` | `ask` | during a match, when another candidate is clearly faster: `ask` (Telegram button), `auto` (switch; auto game WAN only), `off` |
 | `telegram` | `0` | Telegram bot on / off |
-| `telegram_token` / `telegram_chat` | — | bot token (from @BotFather) and chat id |
-| `telegram_user` (list) | — | user ids allowed to use commands and buttons (empty: anyone in the chat) |
+| `telegram_token` / `telegram_chat` | — | bot token (from @BotFather) and chat id (set by pairing) |
+| `telegram_user` (list) | — | `@usernames` / user ids allowed to use the bot and to pair a private chat (empty: anyone in the chat) |
 | `notify` (list) | `mode gw match alert suggest` | events to send: `mode`, `gw`, `match`, `alert`, `suggest`, `start` |
 | `alert_ping` / `alert_loss` / `alert_after` / `alert_cooldown` | `200` / `20` / `3` / `300` | lag alert: ping ms or loss % for N intervals during a match; at most one per cooldown s |
 

@@ -30,7 +30,8 @@ start_service() {
 	config_get token main telegram_token ""
 	config_get tchat main telegram_chat ""
 	config_get tusers main telegram_user ""
-	if [ "$tg" = 1 ] && [ -n "$token" ] && [ -n "$tchat" ]; then
+	# (no chat yet is fine: the bot waits for an allowed user to pair from a private chat)
+	if [ "$tg" = 1 ] && [ -n "$token" ]; then
 		procd_open_instance bot
 		procd_set_param command /usr/sbin/netmode-bot
 		# a different token / chat / user list changes this, so procd restarts the bot on reload

@@ -1,7 +1,9 @@
 #!/usr/bin/ucode -S
 // netmode-bot — the Telegram side of netmode: answers commands and button presses in the configured chat
-// (telegram_chat; optionally only from the user ids in telegram_user). Event messages come from netmode-daemon
-// through /usr/libexec/netmode/notify; the buttons on them land here. Long polling: one request per ~50 s idle.
+// (telegram_chat), from the users in telegram_user (numeric ids or @usernames; empty: anyone in that chat).
+// Pairing: when an allowed user sends a command in a private chat with the bot, that chat becomes telegram_chat
+// and the user's numeric id is added to telegram_user. Event messages come from netmode-daemon through
+// /usr/libexec/netmode/notify; the buttons on them land here. Long polling: one request per ~50 s idle.
 'use strict';
 
 import { popen, readfile, writefile, unlink } from 'fs';
@@ -43,7 +45,7 @@ function load() {
 	chat = '' + (m.telegram_chat || '');
 	users = m.telegram_user ? (type(m.telegram_user) == 'array' ? m.telegram_user : [ m.telegram_user ]) : [];
 	loaded = time();
-	return m.telegram == '1' && match(token, /^[0-9]+:[A-Za-z0-9_-]+$/) && chat != '';
+	return m.telegram == '1' && match(token, /^[0-9]+:[A-Za-z0-9_-]+$/);
 }
 
 function api(method, params, timeout) {
@@ -66,9 +68,32 @@ function send(text, kb) {
 
 function nm(method, args) { return bus.call('netmode', method, args || {}); }
 
-function allowed(chatId, userId) {
-	if ('' + chatId != chat) return false;
-	return !length(users) || index(users, '' + userId) >= 0;
+// a listed user: by numeric id or by @username (case-insensitive)
+function listedUser(from) {
+	for (let i = 0; i < length(users); i++) {
+		let u = lc(trim('' + users[i]));
+		if (u == '' + from.id || (from.username && u == '@' + lc(from.username))) return true;
+	}
+	return false;
+}
+
+function allowed(chatId, from) {
+	if (chat == '' || '' + chatId != chat) return false;
+	return !length(users) || listedUser(from || {});
+}
+
+// an allowed user writes to the bot in private: that chat becomes the one netmode talks to
+function pair(m) {
+	let from = m.from || {}, c = cursor(), list = [];
+	for (let i = 0; i < length(users); i++) push(list, '' + users[i]);
+	if (index(list, '' + from.id) < 0) push(list, '' + from.id);
+	c.set('netmode', 'main', 'telegram_chat', '' + m.chat.id);
+	c.set('netmode', 'main', 'telegram_user', list);
+	c.commit('netmode');
+	chat = '' + m.chat.id;
+	users = list;
+	warn('netmode-bot: paired with user ' + from.id + (from.username ? ' (@' + from.username + ')' : '') + '\n');
+	send('✅ Paired: netmode will talk to you in this chat from now on.\n\n' + HELP);
 }
 
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -164,7 +189,7 @@ function setWan(w) {
 
 function onCallback(q) {
 	let msg = q.message || {}, c = msg.chat || {}, from = q.from || {};
-	if (!allowed(c.id, from.id)) return answer(q, 'Not allowed here');
+	if (!allowed(c.id, from)) return answer(q, 'Not allowed here');
 	let a = split(q.data || '', ':'), act = a[0], arg = a[1], ts = int(a[2] || 0), s;
 	if ((act == 'sw' || act == 'gw' || act == 'keep') && ts && time() - ts > 600)
 		return answer(q, 'This button has expired: send /status');
@@ -188,8 +213,10 @@ function onCallback(q) {
 function onMessage(m) {
 	let text = trim(m.text || '');
 	if (substr(text, 0, 1) != '/') return;
-	if (!allowed((m.chat || {}).id, (m.from || {}).id)) return;
 	if (m.date && m.date < started - 60) return;  // queued while the bot was down
+	let mc = m.chat || {};
+	if (mc.type == 'private' && '' + mc.id != chat && length(users) && listedUser(m.from || {})) return pair(m);
+	if (!allowed(mc.id, m.from)) return;
 	let a = split(text, /\s+/), cmd = lc(replace(a[0], /@.*$/, '')), arg = a[1] ? lc(a[1]) : null, s, n;
 
 	if (cmd == '/status') {
