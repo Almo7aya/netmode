@@ -34,6 +34,7 @@ case "$1" in
 			echo "game WAN ping   : no reply"
 		fi
 		echo "probe target    : $(j @.target) ($(j @.target_src); game server $(j @.server), edge router $(j @.edge))"
+		[ -n "$(j @.region.id)" ] && echo "game region     : $(j @.region.name) ($(j @.region.provider) $(j @.region.id)); WAN pings: $(j @.probe_kind)"
 		[ -n "$(j @.match.start)" ] && echo "match           : since $(hm "$(j @.match.start)")"
 		echo "WAN pings       :"
 		awk '{ if ($3 == 100) printf "  %-5s no reply\n", $1; else printf "  %-5s p20 %s ms, avg %s ms, loss %s%%\n", $1, $2, $4, $3 }' /var/run/netmode/probe 2>/dev/null
@@ -41,9 +42,9 @@ case "$1" in
 	matches)
 		tail -n "${2:-10}" /etc/netmode/matches.jsonl 2>/dev/null | while read -r m; do
 			f() { jsonfilter -s "$m" -e "$1"; }
-			printf '%s  %-15s %4s min  %-10s ping %5s ms  jitter %4s  loss %4s%%  spikes %s  %s MB\n' \
+			printf '%s  %-15s %4s min  %-10s %-12s ping %5s ms  jitter %4s  loss %4s%%  spikes %s  %s MB\n' \
 				"$(date -d "@$(f @.start)" '+%m-%d %H:%M')" "$(f @.device)" "$(( $(f @.dur) / 60 ))" "$(f @.gw)" \
-				"$(f @.ping)" "$(f @.jitter)" "$(f @.loss)" "$(f @.spikes)" "$(f @.mb)"
+				"$(f @.region_name | tr ' ' '_')" "$(f @.ping)" "$(f @.jitter)" "$(f @.loss)" "$(f @.spikes)" "$(f @.mb)"
 		done ;;
 	*) echo "usage: netmode auto|game|all | gw auto|<wan> | status | matches [n]"; exit 1 ;;
 esac

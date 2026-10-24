@@ -125,18 +125,19 @@ return view.extend({
 			return {
 				label: '%s (%d)'.format(k, groups[k].length),
 				values: groups[k].filter(function(m) { return m.ping != null; }).map(function(m) {
-					return { v: m.ping, tip: [ when(m.start) + ' · ' + devOf(m), _('%.1f ms average ping').format(m.ping),
+					return { v: m.ping, tip: [ when(m.start) + ' · ' + devOf(m) + (m.region_name && m.region_name != '-' ? ' · ' + m.region_name : ''), _('%.1f ms average ping').format(m.ping),
 						_('%s on %s').format(dur(m.dur), m.gw), _('jitter %.1f ms, loss %.1f %%, %d spikes').format(m.jitter, m.loss, m.spikes) ] };
 				})
 			};
 		}), W);
 
 		var list = E('table', { 'class': 'table' }, [
-			E('tr', { 'class': 'tr table-titles' }, [ _('Started'), _('Device'), _('Length'), _('Game WAN'), _('Ping avg (min–max)'), _('Jitter'),
+			E('tr', { 'class': 'tr table-titles' }, [ _('Started'), _('Device'), _('Length'), _('Game WAN'), _('Server region'), _('Ping avg (min–max)'), _('Jitter'),
 				_('Loss'), _('Spikes'), _('Ping during the match'), _('Data'), _('Probe target') ].map(th))
 		].concat(ms.map(function(m) {
 			return E('tr', { 'class': 'tr' }, [
 				td(when(m.start)), td(devOf(m)), td(dur(m.dur)), td(m.gw.replace(/>/g, ' → ')),
+				E('td', { 'class': 'td', 'title': m.region && m.region != '-' ? m.region : '' }, [ m.region_name && m.region_name != '-' ? m.region_name : '—' ]),
 				td(m.ping == null ? _('no reply') : '%.1f ms (%.0f–%.0f)'.format(m.ping, m.min, m.max)),
 				td(num(m.jitter, ' ms')), td(num(m.loss, ' %')), td(String(m.spikes)),
 				td(nm.sparkline(m.series || [], 160, 28)), td(num(m.mb, ' MB')),

@@ -48,12 +48,14 @@ call)
 		}
 		;;
 	live)
+		# the dashboard is open: netmode measures (pings cost mobile data) only while someone watches or plays
+		touch $RUN/viewer
 		since=$(arg since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
 		printf '{"points":['
 		[ -s $RUN/live ] && awk -v s="$since" '$1 > s && NF >= 4 {
 			dv = ""; n = split(($5 == "-" || $5 == "") ? "" : $5, a, ",")
 			for (i = 1; i <= n; i++) { split(a[i], kv, "="); dv = dv (i > 1 ? "," : "") "\"" kv[1] "\":" (kv[2] + 0) }
-			printf "%s[%s,%s,\"%s\",\"%s\",{%s}]", (c++ ? "," : ""), $1, ($2 == "-" ? "null" : $2), $3, $4, dv }' $RUN/live
+			printf "%s[%s,%s,\"%s\",\"%s\",{%s}]", (c++ ? "," : ""), $1, ($2 == "-" ? "null" : ($2 == "n" ? "false" : $2)), $3, $4, dv }' $RUN/live
 		echo ']}'
 		;;
 	matches)

@@ -15,10 +15,16 @@ config netmode 'main'
 	# list weight 'wan:2'
 	# move running matches when the game WAN changes (the game freezes ~1 s)
 	option move_flows '1'
-	# game detection: a device uploads >= thresh UDP bytes per interval seconds; game mode ends hold s later
-	option thresh '20000'
+	# 0: only the gaming devices' game UDP uses the game WAN | 1: all their traffic (one public IP for the game's
+	# backend and the match server; their downloads share the game WAN)
+	option game_all_traffic '0'
+	# game detection: a device uploads >= thresh UDP bytes per interval seconds; game mode ends hold s later.
+	# Low on purpose: launching the game / the lobby already start game mode, so nothing switches while a match loads
+	option thresh '8000'
 	option interval '10'
-	option hold '120'
+	option hold '300'
+	# a match (match reports) needs >= match_thresh bytes per interval: above lobby and loading traffic
+	option match_thresh '50000'
 	# learn the game server from a flow once it has moved learn_min bytes in one interval
 	option learn_min '100000'
 	# probing: every probe_every s, 10 pings per WAN; auto switches when a candidate is margin ms better rounds times
@@ -26,6 +32,12 @@ config netmode 'main'
 	option margin '15'
 	option rounds '3'
 	option default_target '8.8.8.8'
+	# when the game server is in Google Cloud or AWS, compare the WANs by the round trip to its region (HTTPS / TCP)
+	# instead of ping (~12 KB per WAN per round)
+	option region_probe '1'
+	# measurements cost mobile data: probe_every while someone plays or a dashboard is open, else every idle_probe s;
+	# the live pings run only then too
+	option idle_probe '900'
 	# pings through the game WAN for the graphs and match reports (5 every interval + 1 per second)
 	option live_ping '1'
 	# match reports: matches shorter than min_match s are dropped; keep the last keep_matches

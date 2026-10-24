@@ -447,7 +447,8 @@ return baseclass.extend({
 			var iv = d.st.interval || 10, liveOn = d.st.ping != null;
 			var kb = function(o, div) { var r = {}; for (var k in (o || {})) r[k] = o[k] / div / 1024; return r; };
 			return useLive
-				? d.live.map(function(p) { return { ts: p[0], ping: p[1], lossPct: liveOn && p[1] == null ? 100 : 0, state: p[2], gw: p[3], dev: kb(p[4], 1) }; })
+				// ping null = no reply (loss), false = not measured (nobody was watching)
+				? d.live.map(function(p) { return { ts: p[0], ping: p[1] === false ? null : p[1], lossPct: liveOn && p[1] === null ? 100 : 0, state: p[2], gw: p[3], dev: kb(p[4], 1) }; })
 				: d.hist.map(function(p) { return { ts: p[0], ping: p[2], lossPct: p[3], state: p[4], gw: p[5], dev: kb(p[6], iv) }; });
 		};
 		merge(res[0], res[1], res[2]);
@@ -500,7 +501,8 @@ return baseclass.extend({
 					E('div', { 'class': 'nm-seg' }, [ E('span', { 'class': 'nm-label' }, [ _('Mode') ]) ].concat([].slice.call(c.modes.children))),
 					E('div', { 'class': 'nm-seg' }, [ E('span', { 'class': 'nm-label' }, [ _('Game WAN') ]) ].concat([].slice.call(c.gws.children))),
 					E('span', { 'class': 'grow' }),
-					E('span', { 'class': 'nm-note', 'title': SRC[st.target_src] || '' }, [ _('probe target %s').format(st.target) ]),
+					E('span', { 'class': 'nm-note', 'title': SRC[st.target_src] || '' }, [ st.probe_kind == 'region' && st.region
+						? _('WAN pings to %s (%s)').format(st.region.name, st.region.id) : _('probe target %s').format(st.target) ]),
 					rangeBox, live,
 					E('a', { 'class': 'nm-x', 'href': L.url('admin/services/netmode/dashboard'), 'title': _('Back to the dashboard') }, [ '✕' ]));
 			} else {
@@ -542,7 +544,10 @@ return baseclass.extend({
 						[ s.avg != null ? _('last 60 s: avg %d ms · jitter %.1f ms · loss %d %%').format(Math.round(s.avg), s.jitter || 0, Math.round(s.loss)) : '',
 						  E('div', {}, [ _('via %s to %s').format(st.gw, st.target) ]) ]),
 					devTile, match,
-					tile(_('Probe target'), st.target, '', [ (SRC[st.target_src] || st.target_src) + (st.target_src != 'server' && st.server && st.server != '-' ? ' · ' + _('game server %s').format(st.server) : '') ]));
+					st.probe_kind == 'region' && st.region
+						? tile(_('Game region'), st.region.name, '', [ (st.region.provider == 'gcp' ? 'Google Cloud ' : 'AWS ') + st.region.id +
+							(st.server && st.server != '-' ? ' · ' + _('server %s').format(st.server) : '') + ' · ' + _('WAN pings measure this region') ])
+						: tile(_('Probe target'), st.target, '', [ (SRC[st.target_src] || st.target_src) + (st.target_src != 'server' && st.server && st.server != '-' ? ' · ' + _('game server %s').format(st.server) : '') ]));
 		};
 
 		var drawCharts = function() {
@@ -633,7 +638,9 @@ return baseclass.extend({
 			// WAN pings (probe rounds)
 			if (probes.length) {
 				var lastProbe = probes[probes.length - 1][1];
-				head(cells.wans, _('WAN pings'), _('ms · 20th percentile of 10 pings per WAN, every probe round'), '', '');
+				head(cells.wans, _('WAN pings'), st.probe_kind == 'region' && st.region
+					? _('ms · round trip to the game region (%s) through each WAN, every probe round').format(st.region.name)
+					: _('ms · 20th percentile of 10 pings per WAN to %s, every probe round').format(st.target), '', '');
 				cells.wans.legend.replaceChildren(nm.legend(wans.map(function(w, i) {
 					return [ nm.lineKey(nm.color(i)), w + (w == st.gw ? ' (' + _('game WAN') + ')' : ''), lastProbe[w] != null ? lastProbe[w] + ' ms' : _('no reply') ];
 				})));

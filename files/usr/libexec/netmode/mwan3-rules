@@ -11,10 +11,20 @@
 config_load netmode
 config_get GAME_IPS main game_ip ""
 config_get WANS main wans ""; [ -n "$WANS" ] || WANS=$(mwan3_ifaces)
-config_get CANDS main cands ""; [ -n "$CANDS" ] || CANDS=$WANS
 config_get WEIGHTS main weight ""
+# game-only WANs (e.g. a relay tunnel): usable as the game WAN, never load-balanced for everyone else
+config_get GAME_ONLY main game_only ""
+NORMAL=""; for w in $WANS; do case " $GAME_ONLY " in *" $w "*) ;; *) NORMAL="$NORMAL $w" ;; esac; done; NORMAL=${NORMAL# }
+config_get CANDS main cands ""; [ -n "$CANDS" ] || CANDS=$NORMAL
+# 'relay:wan1,wan2': while relay is the game WAN, everyone else also stays off wan1 and wan2 (the relay rides on them)
+config_get DEPENDS main depends ""
+deps_of() { for e in $DEPENDS; do [ "${e%%:*}" = "$1" ] && { echo "${e#*:}" | tr ',' ' '; return; }; done; }
 weight() { for e in $WEIGHTS; do [ "${e%%:*}" = "$1" ] && { echo "${e#*:}"; return; }; done; echo 1; }
-SIG="$GAME_IPS|$WANS|$WEIGHTS"
+# all of a gaming device's traffic (TCP, UDP, QUIC) on the game WAN: games check that the IP joining the match server
+# is the one their backend saw, so the device needs one public IP; 0: only its game UDP
+config_get_bool ALL_TRAFFIC main game_all_traffic 0
+GP=udp; [ "$ALL_TRAFFIC" = 1 ] && GP=all
+SIG="$GAME_IPS|$WANS|$WEIGHTS|$GAME_ONLY|$DEPENDS|$ALL_TRAFFIC"
 # mwan3 hands src_ip to iptables -s, which expands a comma list into one rule per device
 SRC=$(for ip in $GAME_IPS; do printf '%s/32,' "$ip"; done); SRC=${SRC%,}
 
@@ -40,7 +50,7 @@ rule()   { n=$1; shift; $UCI set "mwan3.$n=rule"; $UCI set "mwan3.$n.family=ipv4
 if [ "$1" = remove ]; then
 	for s in balanced_all $($UCI show mwan3 | sed -n 's/^mwan3\.\(bal_[a-z0-9_]*\)=member$/\1/p'); do $UCI -q delete "mwan3.$s"; done
 	policy balanced_all
-	for w in $WANS; do member "bal_$w" "$w" 1 "$(weight $w)"; use balanced_all "bal_$w"; done
+	for w in $NORMAL; do member "bal_$w" "$w" 1 "$(weight $w)"; use balanced_all "bal_$w"; done
 	rule default_rule_v4 dest_ip 0.0.0.0/0 proto all sticky 0 use_policy balanced_all
 	$UCI commit mwan3
 	logger -t netmode "mwan3 rules removed (default_rule_v4 -> balanced_all)"
@@ -48,30 +58,41 @@ if [ "$1" = remove ]; then
 	exit 0
 fi
 
-# nm_all: every WAN
+# nm_all: every (normal) WAN
 policy nm_all
-for w in $WANS; do member "nm_all_$w" "$w" 1 "$(weight $w)"; use nm_all "nm_all_$w"; done
+for w in $NORMAL; do member "nm_all_$w" "$w" 1 "$(weight $w)"; use nm_all "nm_all_$w"; done
 for g in $WANS; do
-	# nm_game_<g>: the game WAN first, every other WAN as fallback
+	# nm_game_<g>: the game WAN first, every other normal WAN as fallback
 	policy "nm_game_$g"; member "nm_gm_${g}_$g" "$g" 1 1; use "nm_game_$g" "nm_gm_${g}_$g"
-	for w in $WANS; do [ "$w" = "$g" ] && continue; member "nm_gm_${g}_$w" "$w" 2 "$(weight $w)"; use "nm_game_$g" "nm_gm_${g}_$w"; done
-	# nm_oth_<g>: everyone else on every WAN except <g> (which is only a last fallback)
-	policy "nm_oth_$g"
-	for w in $WANS; do [ "$w" = "$g" ] && continue; member "nm_ot_${g}_$w" "$w" 1 "$(weight $w)"; use "nm_oth_$g" "nm_ot_${g}_$w"; done
-	member "nm_ot_${g}_$g" "$g" 2 1; use "nm_oth_$g" "nm_ot_${g}_$g"
+	for w in $NORMAL; do [ "$w" = "$g" ] && continue; member "nm_gm_${g}_$w" "$w" 2 "$(weight $w)"; use "nm_game_$g" "nm_gm_${g}_$w"; done
+	# nm_oth_<g>: everyone else on every normal WAN except <g> and the WANs <g> depends on (those only as a last
+	# fallback)
+	policy "nm_oth_$g"; dg=" $(deps_of $g) "
+	for w in $NORMAL; do
+		[ "$w" = "$g" ] && continue
+		case "$dg" in *" $w "*) continue ;; esac
+		member "nm_ot_${g}_$w" "$w" 1 "$(weight $w)"; use "nm_oth_$g" "nm_ot_${g}_$w"
+	done
+	for w in $(deps_of $g) $g; do
+		case " $NORMAL " in *" $w "*) member "nm_ot_${g}_$w" "$w" 2 1; use "nm_oth_$g" "nm_ot_${g}_$w" ;; esac
+	done
 done
 
 # rules, first match wins (the nm_g_* / nm_gw_* ipsets are the switches the daemon flips); names <= 15 chars
+gpc_rules() {  # the gaming devices -> the game WAN
+	if [ -n "$SRC" ]; then
+		for g in $WANS; do rule "nm_gpc_$g" src_ip "$SRC" proto $GP ipset "nm_gw_$g" use_policy "nm_game_$g"; done
+		rule nm_gpc_default src_ip "$SRC" proto $GP use_policy "nm_game_${CANDS%% *}"
+	else
+		# no gaming devices yet: a placeholder that matches nothing keeps the build signature
+		rule nm_gpc_default src_ip 0.0.0.0/32 proto udp use_policy nm_all
+	fi
+	$UCI set "mwan3.nm_gpc_default.netmode_sig=$SIG"
+}
+[ "$ALL_TRAFFIC" = 1 ] && gpc_rules  # before the QUIC rules: the devices' QUIC goes to the game WAN too
 for g in $WANS; do rule "nm_quic_g_$g" proto udp dest_port 443 ipset "nm_g_$g" use_policy "nm_oth_$g"; done
 rule nm_quic_all proto udp dest_port 443 use_policy nm_all
-if [ -n "$SRC" ]; then
-	for g in $WANS; do rule "nm_gpc_$g" src_ip "$SRC" proto udp ipset "nm_gw_$g" use_policy "nm_game_$g"; done
-	rule nm_gpc_default src_ip "$SRC" proto udp use_policy "nm_game_${CANDS%% *}"
-else
-	# no gaming devices yet: a placeholder that matches nothing keeps the build signature
-	rule nm_gpc_default src_ip 0.0.0.0/32 proto udp use_policy nm_all
-fi
-$UCI set "mwan3.nm_gpc_default.netmode_sig=$SIG"
+[ "$ALL_TRAFFIC" = 1 ] || gpc_rules
 for g in $WANS; do rule "nm_oth_g_$g" proto all ipset "nm_g_$g" use_policy "nm_oth_$g"; done
 rule default_rule_v4 dest_ip 0.0.0.0/0 proto all sticky 0 use_policy nm_all
 $UCI commit mwan3

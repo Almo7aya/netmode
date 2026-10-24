@@ -16,6 +16,7 @@ fi
 missing=""
 for b in mwan3 ipset conntrack jsonfilter ubus; do command -v $b >/dev/null 2>&1 || missing="$missing $b"; done
 [ -z "$missing" ] || { echo "missing:$missing (opkg install mwan3 ipset conntrack)"; exit 1; }
+for b in curl ucode; do command -v $b >/dev/null 2>&1 || echo "note: $b is missing; region probes, Telegram and the bot need it"; done
 
 # backup of the mwan3 config (last 5 kept)
 TS=$(date +%Y%m%d_%H%M%S)
@@ -48,7 +49,7 @@ uci commit netmode
 	cp "files/${f#./}" "/${f#./}"
 done
 chmod 755 /etc/init.d/netmode /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/sbin/netmode-bot \
-	/usr/libexec/netmode/mwan3-rules /usr/libexec/netmode/notify /usr/libexec/rpcd/netmode
+	/usr/libexec/netmode/mwan3-rules /usr/libexec/netmode/notify /usr/libexec/netmode/regions /usr/libexec/rpcd/netmode
 
 for f in /etc/netmode/ /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/sbin/netmode-bot /usr/lib/netmode/ \
 	/etc/init.d/netmode /usr/libexec/netmode/ \

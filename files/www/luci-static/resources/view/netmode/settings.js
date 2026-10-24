@@ -89,6 +89,14 @@ return view.extend({
 		wans.forEach(function(w) { o.value(w, w); });
 		o.default = 'auto';
 
+		o = s.taboption('general', form.Flag, 'game_all_traffic', _('All of the device\'s traffic on the game WAN'),
+			_('Off (default): only the gaming devices\' game traffic (UDP) uses the game WAN; their other connections use the ' +
+			  'other WANs. On: everything they send (TCP, UDP, QUIC) uses the game WAN, so the game\'s backend and the match ' +
+			  'server see one public IP (try this if joining matches fails at random); their downloads then share the game ' +
+			  'WAN. Changing it rebuilds the mwan3 rules.'));
+		o.default = '0';
+		o.rmempty = false;
+
 		o = s.taboption('general', form.Flag, 'move_flows', _('Move running matches'),
 			_('When the game WAN changes, move the gaming devices\' running game connections to it right away ' +
 			  '(the game freezes for about a second). Off: they stay on the old WAN until the next match.'));
@@ -100,6 +108,18 @@ return view.extend({
 			  'the mwan3 rules (a short interruption for everyone).'));
 		ifaces.forEach(function(w) { o.value(w, w); });
 
+		o = s.taboption('general', form.MultiValue, 'game_only', _('Game-only WANs'),
+			_('WANs (e.g. a relay tunnel) that can be the game WAN but never carry anyone else\'s traffic.'));
+		wans.forEach(function(w) { o.value(w, w); });
+
+		o = s.taboption('general', form.DynamicList, 'depends', _('Depends on'),
+			_('<code>relay:wan1,wan2</code>: while relay is the game WAN, everyone else also stays off wan1 and wan2 ' +
+			  '(the WANs the relay itself rides on).'));
+		o.placeholder = 'relay:wan1,wan2';
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Za-z0-9_]+:[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$/.test(value) ? true : _('Use wan:wan,wan');
+		};
+
 		o = s.taboption('general', form.DynamicList, 'weight', _('WAN weights'),
 			_('Load-balancing weight per WAN as <code>wan:weight</code>, e.g. <code>wan1:4</code>; unlisted WANs get 1. ' +
 			  'Changing this rebuilds the mwan3 rules.'));
@@ -108,11 +128,18 @@ return view.extend({
 			return !value || /^[A-Za-z0-9_]+:[0-9]+$/.test(value) ? true : _('Use wan:weight, e.g. wan1:4');
 		};
 
-		o = s.taboption('detect', form.Value, 'thresh', _('Game traffic threshold (bytes)'),
+		o = s.taboption('detect', form.Value, 'thresh', _('Game mode threshold (bytes)'),
 			_('Game mode starts when a gaming device uploads at least this much UDP in one interval (DNS, NTP, QUIC and LAN ' +
-			  'traffic don\'t count). Measured with The Finals: a match sends 150–350 KB per 10 s; the lobby sends bursts of up to ~85 KB.'));
+			  'traffic don\'t count). Keep it low enough that launching the game / the lobby already start game mode, so ' +
+			  'nothing switches while a match loads. Measured with The Finals: launch and lobby 16–17 KB per 10 s, loading ' +
+			  'a match 20–46 KB, a match 110–400 KB.'));
 		o.datatype = 'uinteger';
-		o.placeholder = '20000';
+		o.placeholder = '8000';
+
+		o = s.taboption('detect', form.Value, 'match_thresh', _('Match threshold (bytes)'),
+			_('For the match reports: a match runs while a device uploads at least this much per interval (above lobby and loading traffic).'));
+		o.datatype = 'uinteger';
+		o.placeholder = '50000';
 
 		o = s.taboption('detect', form.Value, 'interval', _('Interval (s)'),
 			_('How often netmode measures, pings the game WAN and records graph points.'));
@@ -122,7 +149,7 @@ return view.extend({
 		o = s.taboption('detect', form.Value, 'hold', _('Hold (s)'),
 			_('Game mode stays on this long after the last busy interval (loading screens, lobbies).'));
 		o.datatype = 'range(10,3600)';
-		o.placeholder = '120';
+		o.placeholder = '300';
 
 		o = s.taboption('detect', form.Value, 'learn_min', _('Game server threshold (bytes)'),
 			_('While playing, the busiest UDP flow becomes the game server (and the probe target) once it uploads this much in one interval.'));

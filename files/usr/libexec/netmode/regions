@@ -1,0 +1,76 @@
+#!/usr/bin/ucode -S
+// netmode regions: which cloud region a game server is in, and how to measure the round trip to that region
+// through any WAN (a fair comparison even for a relay, unlike pinging one router near home).
+//   regions update        download Google Cloud and AWS address ranges + Google's per-region test endpoints
+//   regions lookup <ip>   "<provider> <region> <name> <endpoint>"  (gcp: HTTPS URL, aws: host)  or "-"
+'use strict';
+
+import { popen, readfile, writefile, mkdir } from 'fs';
+
+const DIR = '/etc/netmode/regions';
+const AWS = {
+	'me-south-1': 'Bahrain', 'me-central-1': 'UAE', 'il-central-1': 'Tel_Aviv', 'ap-south-1': 'Mumbai',
+	'ap-south-2': 'Hyderabad', 'eu-central-1': 'Frankfurt', 'eu-central-2': 'Zurich', 'eu-west-1': 'Ireland',
+	'eu-west-2': 'London', 'eu-west-3': 'Paris', 'eu-south-1': 'Milan', 'eu-south-2': 'Spain', 'eu-north-1': 'Stockholm',
+	'af-south-1': 'Cape_Town', 'us-east-1': 'N._Virginia', 'us-east-2': 'Ohio', 'us-west-1': 'N._California',
+	'us-west-2': 'Oregon', 'ca-central-1': 'Canada', 'sa-east-1': 'Sao_Paulo', 'ap-southeast-1': 'Singapore',
+	'ap-southeast-2': 'Sydney', 'ap-northeast-1': 'Tokyo', 'ap-northeast-2': 'Seoul', 'ap-east-1': 'Hong_Kong'
+};
+
+function fetch(url) {
+	let p = popen("curl -sf -m 90 '" + url + "'", 'r');
+	if (!p) return null;
+	let d = p.read('all');
+	p.close();
+	try { return json(d); } catch (e) { return null; }
+}
+
+function ip2n(ip) {
+	let p = split(ip, '.');
+	return length(p) == 4 ? int(p[0]) * 16777216 + int(p[1]) * 65536 + int(p[2]) * 256 + int(p[3]) : null;
+}
+
+function update() {
+	let g = fetch('https://www.gstatic.com/ipranges/cloud.json');
+	let a = fetch('https://ip-ranges.amazonaws.com/ip-ranges.json');
+	let ep = fetch('https://global.gcping.com/api/endpoints');
+	if (!g || !a || !ep) {
+		warn('regions: download failed\n');
+		exit(1);
+	}
+	let out = [], eps = [], n = 0;
+	for (let i = 0; i < length(g.prefixes); i++)
+		if (g.prefixes[i].ipv4Prefix) push(out, g.prefixes[i].ipv4Prefix + ' gcp ' + g.prefixes[i].scope);
+	for (let i = 0; i < length(a.prefixes); i++)
+		if (a.prefixes[i].service == 'EC2') push(out, a.prefixes[i].ip_prefix + ' aws ' + a.prefixes[i].region);
+	for (let r in ep)
+		if (ep[r].URL) push(eps, r + ' ' + ep[r].URL + ' ' + replace(ep[r].RegionName || r, /[ ,]+/g, '_'));
+	mkdir(DIR);
+	writefile(DIR + '/ranges', join('\n', out) + '\n');
+	writefile(DIR + '/gcp-endpoints', join('\n', eps) + '\n');
+	print('regions: ' + length(out) + ' address ranges, ' + length(eps) + ' Google Cloud endpoints\n');
+}
+
+function lookup(ip) {
+	let n = ip2n(ip), best = null, bestLen = -1;
+	if (n == null) return '-';
+	for (let line in split(readfile(DIR + '/ranges') || '', '\n')) {
+		let f = split(line, ' '), c = split(f[0], '/');
+		if (length(f) < 3 || length(c) < 2) continue;
+		let len = int(c[1]), net = ip2n(c[0]), size = 1;
+		for (let k = 0; k < 32 - len; k++) size *= 2;
+		if (net != null && n >= net && n < net + size && len > bestLen) { bestLen = len; best = f; }
+	}
+	if (!best) return '-';
+	if (best[1] == 'aws')
+		return 'aws ' + best[2] + ' ' + (AWS[best[2]] || best[2]) + ' dynamodb.' + best[2] + '.amazonaws.com';
+	for (let line in split(readfile(DIR + '/gcp-endpoints') || '', '\n')) {
+		let e = split(line, ' ');
+		if (e[0] == best[2]) return 'gcp ' + best[2] + ' ' + e[2] + ' ' + e[1];
+	}
+	return 'gcp ' + best[2] + ' ' + best[2] + ' -';
+}
+
+if (ARGV[0] == 'update') update();
+else if (ARGV[0] == 'lookup' && ARGV[1]) print(lookup(ARGV[1]) + '\n');
+else { warn('usage: regions update | lookup <ip>\n'); exit(1); }

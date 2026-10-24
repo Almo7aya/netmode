@@ -37,6 +37,9 @@ const COMMANDS = [
 ];
 
 let bus = connect();
+// the ubus connection catches SIGTERM / SIGINT, so a bot waiting on Telegram (curl) would not stop when procd asks
+signal('SIGTERM', 'default');
+signal('SIGINT', 'default');
 let token = '', chat = '', users = [], loaded = 0, started = time();
 
 function load() {
@@ -141,7 +144,9 @@ function statusKb(s) {
 
 function pingsText(s) {
 	if (!s || !s.running) return '⏹ netmode is not running';
-	let l = [ 'WAN pings to ' + s.target + ' (20th percentile of 10):' ], probes = s.probe || [];
+	let l = [ s.probe_kind == 'region' && s.region
+		? 'Round trip to the game region ' + s.region.name + ' (' + s.region.id + ') through each WAN:'
+		: 'WAN pings to ' + s.target + ' (20th percentile of 10):' ], probes = s.probe || [];
 	for (let i = 0; i < length(probes); i++) {
 		let p = probes[i];
 		push(l, (p.wan == s.gw ? '● ' : '○ ') + p.wan + (p.p20 != null ? sprintf(': %d ms (avg %d, loss %d %%)', p.p20, p.avg, p.loss) : ': no reply'));
@@ -265,8 +270,19 @@ if (ARGV[0] == '--status') {
 api('setMyCommands', { commands: COMMANDS });
 let offset = int(trim(readfile(OFFSET) || '0')) || 0;
 
+// Each poll is a new HTTPS connection (~8 KB of mobile data), so the bot listens continuously (long polling) only
+// while it matters: someone plays (Switch buttons) or the bot was used in the last 10 minutes. Otherwise it checks
+// every 5 minutes (~2 MB a day), and wakes up as soon as a match starts.
+let lastUse = 0;
+function busy() {
+	if (time() - lastUse < 600) return true;
+	let s = nm('status');
+	return !!(s && (s.playing || s.state == 'game' || s.match));
+}
+
 while (true) {
-	let r = api('getUpdates', { offset: offset, timeout: 50, allowed_updates: [ 'message', 'callback_query' ] }, 65);
+	let fast = busy();
+	let r = api('getUpdates', { offset: offset, timeout: fast ? 50 : 0, allowed_updates: [ 'message', 'callback_query' ] }, fast ? 65 : 20);
 	if (!r || !r.ok) {
 		if (r && r.description) warn('netmode-bot: ' + r.description + '\n');
 		sleep(10000);
@@ -275,6 +291,7 @@ while (true) {
 		for (let i = 0; i < length(r.result); i++) {
 			let u = r.result[i];
 			offset = u.update_id + 1;
+			lastUse = time();
 			try {
 				if (u.callback_query) onCallback(u.callback_query);
 				else if (u.message) onMessage(u.message);
@@ -284,6 +301,8 @@ while (true) {
 			}
 		}
 		writefile(OFFSET, '' + offset);
+		if (!fast && !length(r.result))
+			for (let w = 0; w < 30 && !busy(); w++) sleep(10000);  // idle: next check in 5 min, sooner if a match starts
 	}
 	if (time() - loaded > 60 && !load()) exit(0);
 }

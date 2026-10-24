@@ -1,7 +1,9 @@
 #!/bin/sh
 # netmode-sampler — one sample per second for the live graphs: a ping through the game WAN to the probe target
 # and each gaming device's UDP upload. Keeps the last 15 minutes in /var/run/netmode/live:
-#   "ts ping_ms|- state game_wan ip=bytes,ip=bytes,..."
+#   "ts ping_ms|-|n state game_wan ip=bytes,ip=bytes,..."   (-: no reply, n: not measured)
+# The ping costs mobile data, so it only runs while a dashboard is open (rpcd touches /var/run/netmode/viewer);
+# the upload numbers come from conntrack and are always recorded.
 # Each ping gets 2 s to answer (a congested WAN can be slower than 1 s without losing anything), so a second is
 # written 2 s after it starts: the pings overlap in 3 slots. The decisions stay with netmode-daemon.
 . /lib/functions.sh
@@ -34,11 +36,12 @@ while true; do
 	state=all; [ -f $RUN/state ] && read -r state _ < $RUN/state
 
 	rm -f "$RUN/live.ping.$slot"
-	if [ "$LIVE" = 1 ] && [ -n "$dev" ]; then
+	viewed=0; [ -f $RUN/viewer ] && [ $((now - $(date -r $RUN/viewer +%s))) -lt 30 ] && viewed=1
+	if [ "$LIVE" = 1 ] && [ -n "$dev" ] && [ $viewed = 1 ]; then
 		ping -I "$dev" -c 1 -W 2 "$tgt" > "$RUN/live.ping.$slot" 2>/dev/null &
 		eval "pp_$slot=$!"
 	else
-		eval "pp_$slot=''"
+		eval "pp_$slot=n"
 	fi
 	set -- $(udp_delta "$GAME_IPS" $RUN/live.flows)
 	eval "row_$slot=\"$now ${state:-all} ${gw:--} ${4:--}\""
@@ -49,7 +52,9 @@ while true; do
 	eval "opp=\$pp_$old; orow=\$row_$old"
 	[ -n "$orow" ] || continue
 	p=-
-	if [ -n "$opp" ]; then
+	if [ "$opp" = n ]; then
+		p=n
+	elif [ -n "$opp" ]; then
 		kill "$opp" 2>/dev/null
 		p=$(sed -n 's/.*time=\([0-9.]*\).*/\1/p' "$RUN/live.ping.$old")
 		p=${p:--}
