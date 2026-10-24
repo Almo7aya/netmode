@@ -48,7 +48,7 @@ uci commit netmode
 	cp "files/${f#./}" "/${f#./}"
 done
 chmod 755 /etc/init.d/netmode /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler \
-	/usr/libexec/netmode/mwan3-rules /usr/libexec/rpcd/netmode
+	/usr/libexec/netmode/mwan3-rules /usr/libexec/netmode/notify /usr/libexec/rpcd/netmode
 
 for f in /etc/netmode/ /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/lib/netmode/ \
 	/etc/init.d/netmode /usr/libexec/netmode/ \

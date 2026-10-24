@@ -31,3 +31,19 @@ config netmode 'main'
 	# match reports: matches shorter than min_match s are dropped; keep the last keep_matches
 	option min_match '60'
 	option keep_matches '200'
+	# Telegram notifications: a bot token from @BotFather and the chat id of a user, group or channel
+	option telegram '0'
+	# option telegram_token ''
+	# option telegram_chat ''
+	# events: mode (game mode on/off), gw (game WAN changes), match (report after each match),
+	# alert (lag during a match, no replies through the game WAN), start (netmode started)
+	list notify 'mode'
+	list notify 'gw'
+	list notify 'match'
+	list notify 'alert'
+	# lag alert: ping >= alert_ping ms or loss >= alert_loss % for alert_after intervals during a match,
+	# then quiet for alert_cooldown s
+	option alert_ping '200'
+	option alert_loss '20'
+	option alert_after '3'
+	option alert_cooldown '300'

@@ -3,11 +3,13 @@
 'require form';
 'require uci';
 'require rpc';
+'require ui';
 
 // Services > Netmode > Settings: /etc/config/netmode. The daemon reads it every interval; changing the gaming
 // devices or the WAN list rebuilds the mwan3 rules (init script reload_service -> /usr/libexec/netmode/mwan3-rules check).
 
 var callHostHints = rpc.declare({ object: 'luci-rpc', method: 'getHostHints', expect: { '': {} } });
+var callNotifyTest = rpc.declare({ object: 'netmode', method: 'notify_test' });
 
 function ip2n(ip) {
 	var p = String(ip).split('.');
@@ -51,6 +53,7 @@ return view.extend({
 		s.tab('detect', _('Game detection'));
 		s.tab('select', _('Game WAN selection'));
 		s.tab('reports', _('Match reports'));
+		s.tab('notify', _('Notifications'));
 
 		o = s.taboption('general', form.ListValue, 'mode', _('Mode'),
 			_('Auto: game mode while a gaming device plays. Game mode / All WANs: always.'));
@@ -162,6 +165,57 @@ return view.extend({
 		o = s.taboption('reports', form.Value, 'keep_matches', _('Matches kept'));
 		o.datatype = 'range(1,10000)';
 		o.placeholder = '200';
+
+		o = s.taboption('notify', form.Flag, 'telegram', _('Telegram notifications'),
+			_('Messages from a Telegram bot: create one with @BotFather, add it to your chat (or start a chat with it) and enter its token and the chat id.'));
+		o.rmempty = false;
+
+		o = s.taboption('notify', form.Value, 'telegram_token', _('Bot token'));
+		o.password = true;
+		o.placeholder = '123456789:AA…';
+		o.validate = function(section_id, value) {
+			return !value || /^[0-9]+:[A-Za-z0-9_-]{20,}$/.test(value) ? true : _('Looks like 123456789:AA… (from @BotFather)');
+		};
+
+		o = s.taboption('notify', form.Value, 'telegram_chat', _('Chat id'),
+			_('A user id, a group id (negative, e.g. -1001234567890) or @channelname.'));
+		o.validate = function(section_id, value) {
+			return !value || /^(-?[0-9]+|@[A-Za-z0-9_]{5,})$/.test(value) ? true : _('A number (negative for groups) or @channelname');
+		};
+
+		o = s.taboption('notify', form.MultiValue, 'notify', _('Send'));
+		o.value('mode', _('Game mode on / off'));
+		o.value('gw', _('Game WAN changes'));
+		o.value('match', _('A report after each match'));
+		o.value('alert', _('Lag alerts during a match, no replies through the game WAN'));
+		o.value('start', _('netmode started (router boot, update)'));
+		o.default = 'mode gw match alert';
+
+		o = s.taboption('notify', form.Value, 'alert_ping', _('Lag alert: ping (ms)'),
+			_('Alert when the game WAN\'s ping stays at or above this during a match…'));
+		o.datatype = 'uinteger';
+		o.placeholder = '200';
+
+		o = s.taboption('notify', form.Value, 'alert_loss', _('Lag alert: loss (%)'), _('…or its packet loss stays at or above this…'));
+		o.datatype = 'range(1,100)';
+		o.placeholder = '20';
+
+		o = s.taboption('notify', form.Value, 'alert_after', _('Lag alert: intervals'), _('…for this many intervals in a row.'));
+		o.datatype = 'range(1,60)';
+		o.placeholder = '3';
+
+		o = s.taboption('notify', form.Value, 'alert_cooldown', _('Lag alert: quiet time (s)'), _('At most one lag alert per this many seconds.'));
+		o.datatype = 'uinteger';
+		o.placeholder = '300';
+
+		o = s.taboption('notify', form.Button, '_test', _('Test'), _('Uses the saved settings: Save first.'));
+		o.inputtitle = _('Send test message');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			return callNotifyTest().then(function(r) {
+				ui.addNotification(null, E('p', r && r.ok ? _('Test message sent.') : _('Not sent: %s').format(r ? r.result : '?')), r && r.ok ? 'info' : 'danger');
+			});
+		};
 
 		return m.render();
 	}

@@ -9,6 +9,7 @@
 #   ubus call netmode matches '{"limit":50}'    match reports, newest first
 #   ubus call netmode set '{"mode":"game"}' / '{"gw":"wan1"}'
 #   ubus call netmode clear_matches
+#   ubus call netmode notify_test               send a Telegram test message with the saved settings
 RUN=/var/run/netmode
 DATA=/etc/netmode
 
@@ -16,7 +17,7 @@ arg() { echo "$input" | jsonfilter -e "@.$1" 2>/dev/null; }
 
 case "$1" in
 list)
-	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str"},"clear_matches":{}}'
+	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str"},"clear_matches":{},"notify_test":{}}'
 	;;
 call)
 	read -r input
@@ -75,6 +76,11 @@ call)
 	clear_matches)
 		: > $DATA/matches.jsonl
 		echo '{"ok":true}'
+		;;
+	notify_test)
+		res=$(/usr/libexec/netmode/notify -t 2>&1); ok=false
+		[ "$res" = sent ] && ok=true
+		printf '{"ok":%s,"result":"%s"}\n' "$ok" "$(echo "$res" | tr -d '"\\\n' | cut -c1-200)"
 		;;
 	*)
 		echo '{"error":"unknown method"}'

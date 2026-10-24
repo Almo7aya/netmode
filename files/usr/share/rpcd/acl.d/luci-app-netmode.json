@@ -10,7 +10,7 @@
 		},
 		"write": {
 			"ubus": {
-				"netmode": [ "set", "clear_matches" ]
+				"netmode": [ "set", "clear_matches", "notify_test" ]
 			},
 			"uci": [ "netmode" ]
 		}

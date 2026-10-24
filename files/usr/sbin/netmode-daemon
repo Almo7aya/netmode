@@ -38,7 +38,23 @@ load_conf() {
 	config_get_bool LIVE_PING main live_ping 1
 	config_get MIN_MATCH main min_match 60
 	config_get KEEP_MATCHES main keep_matches 200
+	config_get_bool TELEGRAM main telegram 0
+	config_get NOTIFY main notify "mode gw match alert"
+	config_get ALERT_PING main alert_ping 200
+	config_get ALERT_LOSS main alert_loss 20
+	config_get ALERT_AFTER main alert_after 3
+	config_get ALERT_COOLDOWN main alert_cooldown 300
 }
+
+# Telegram notification for event $1 (mode, gw, match, alert, start) when it is switched on; sent in the background
+notify() {
+	[ "$TELEGRAM" = 1 ] || return 0
+	case " $NOTIFY " in *" $1 "*) ;; *) return 0 ;; esac
+	/usr/libexec/netmode/notify "$2" >/dev/null 2>&1 &
+}
+
+# " (94 ms)" from the last probe round for WAN $1 (empty when unknown)
+ping_of() { awk -v w="$1" '$1 == w { print " (" ($3 == 100 ? "no reply" : $2 " ms") ")" }' $RUN/probe 2>/dev/null; }
 
 set_on()  { ipset -exist create "$1" hash:net; ipset -exist add "$1" 0.0.0.0/1; ipset -exist add "$1" 128.0.0.0/1; }
 set_off() { ipset -exist create "$1" hash:net; ipset flush "$1"; }
@@ -125,7 +141,10 @@ fallback_target() {
 			TARGET=$t; save_target; return
 		fi
 	done
-	[ "$warned" = "$TARGET" ] || logger -t netmode "no ping replies through the game WAN $GW (target $TARGET, edge $EDGE, default $DEFAULT_TARGET)"
+	if [ "$warned" != "$TARGET" ]; then
+		logger -t netmode "no ping replies through the game WAN $GW (target $TARGET, edge $EDGE, default $DEFAULT_TARGET)"
+		notify alert "❌ No ping replies through the game WAN $GW — is it down?"
+	fi
 	warned=$TARGET
 }
 
@@ -167,23 +186,37 @@ probe_round() {
 
 switch() {  # apply $want and $newgw
 	[ "$want" = "$EFF" ] && [ "$newgw" = "$GW" ] && return
-	[ "$want" != "$EFF" ] && logger -t netmode "mode $EFF -> $want (gaming devices UDP $UDP B/${INTERVAL}s)"
-	oldgw=$GW; EFF=$want; GW=$newgw; apply_sets
+	oldeff=$EFF; oldgw=$GW; EFF=$want; GW=$newgw; apply_sets
+	if [ "$EFF" != "$oldeff" ]; then
+		logger -t netmode "mode $oldeff -> $EFF (gaming devices UDP $UDP B/${INTERVAL}s)"
+		if [ "$EFF" = game ]; then
+			who=$(names_of $BUSY)
+			notify mode "🎮 Game mode on$([ "$MODE" = game ] && echo ' (set by hand)')${who:+ — $who playing}
+Game WAN: $GW$(ping_of "$GW"). Everyone else is on the other WANs."
+		else
+			why=""; [ "$MODE" = all ] && why=" (set by hand)"
+			[ "$MODE" = auto ] && [ "$last_game" -gt 0 ] && why=" — no game traffic for $HOLD s"
+			notify mode "🚀 Game mode off$why. Everyone shares every WAN again."
+		fi
+	fi
 	if [ "$GW" != "$oldgw" ]; then
 		echo "$GW" > $DATA/gw; better=0; n=0
 		[ "$MOVE_FLOWS" = 1 ] && n=$(move_flows)
 		logger -t netmode "game WAN $oldgw -> $GW ($how; moved $n game flows)"
+		if [ "$how" = manual ]; then why="picked by hand"; else why="auto: $GW$(ping_of "$GW") beat $oldgw$(ping_of "$oldgw")"; fi
+		notify gw "🔀 Game WAN $oldgw → $GW ($why)$([ "$n" -gt 0 ] && echo " — the running match was moved")"
 	fi
 }
 
 name_of() { awk -v ip="$1" '$1 == ip { n = $2 } END { print (n == "" ? "-" : n) }' $RUN/names 2>/dev/null; }
+names_of() { for ip in "$@"; do n=$(name_of "$ip"); [ "$n" = - ] && n=$ip; printf '%s, ' "$n"; done | sed 's/, $//'; }
 
 # one JSON line per match in $DATA/matches.jsonl from the per-tick samples in $RUN/match.<key>
 # ("ts gw udp avg min max jitter loss"); the quiet tail after the last busy tick is not part of the match
 match_end() {  # $1 = device ip, $2 = start, $3 = last busy tick
-	k=$(key_of "$1"); f=$RUN/match.$k
-	[ -s "$f" ] && awk -v start="$2" -v last="$3" -v min="$MIN_MATCH" -v iv="$INTERVAL" -v ip="$1" -v nm="$(name_of "$1")" \
-			-v srv="$SERVER" -v tgt="$TARGET" -v tsrc="$TARGET_SRC" '
+	k=$(key_of "$1"); f=$RUN/match.$k; summary=""
+	[ -s "$f" ] && summary=$(awk -v start="$2" -v last="$3" -v min="$MIN_MATCH" -v iv="$INTERVAL" -v ip="$1" -v nm="$(name_of "$1")" \
+			-v srv="$SERVER" -v tgt="$TARGET" -v tsrc="$TARGET_SRC" -v out=$DATA/matches.jsonl '
 		$1 > last { next }
 		{
 			n++; bytes += $3; ls += $8
@@ -198,17 +231,26 @@ match_end() {  # $1 = device ip, $2 = start, $3 = last busy tick
 			dur = last - start
 			if (n == 0 || dur < min) exit
 			if (k) { avg = s / k; for (i = 1; i <= k; i++) if (hi[i] >= avg + 50) sp++ }
-			printf "{\"start\":%d,\"end\":%d,\"dur\":%d,\"device\":\"%s\",\"name\":\"%s\",\"gw\":\"%s\",\"switches\":%d,\"server\":\"%s\",\"target\":\"%s\",\"target_src\":\"%s\",\"mb\":%.1f,",
-				start, last, dur, ip, nm, gws, sw, srv, tgt, tsrc, bytes / 1048576
-			if (k) printf "\"ping\":%.1f,\"min\":%.1f,\"max\":%.1f,\"jitter\":%.1f,", avg, mn, mx, js / k
-			else printf "\"ping\":null,\"min\":null,\"max\":null,\"jitter\":null,"
-			printf "\"loss\":%.1f,\"spikes\":%d,\"interval\":%d,\"series\":[", ls / n, sp, iv
-			for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), ser[i]
-			print "]}"
-		}' "$f" >> $DATA/matches.jsonl
+			j = sprintf("{\"start\":%d,\"end\":%d,\"dur\":%d,\"device\":\"%s\",\"name\":\"%s\",\"gw\":\"%s\",\"switches\":%d,\"server\":\"%s\",\"target\":\"%s\",\"target_src\":\"%s\",\"mb\":%.1f,",
+				start, last, dur, ip, nm, gws, sw, srv, tgt, tsrc, bytes / 1048576)
+			if (k) j = j sprintf("\"ping\":%.1f,\"min\":%.1f,\"max\":%.1f,\"jitter\":%.1f,", avg, mn, mx, js / k)
+			else j = j "\"ping\":null,\"min\":null,\"max\":null,\"jitter\":null,"
+			j = j sprintf("\"loss\":%.1f,\"spikes\":%d,\"interval\":%d,\"series\":[", ls / n, sp, iv)
+			for (i = 1; i <= n; i++) j = j (i > 1 ? "," : "") ser[i]
+			print j "]}" >> out
+			# the Telegram summary
+			g = gws; gsub(/>/, " → ", g)
+			printf "🏁 Match over — %s: %s on %s\n", (nm != "-" ? nm : ip), (dur < 90 ? dur " s" : int(dur / 60 + 0.5) " min"), g
+			if (k) printf "Ping %.0f ms avg (%.0f–%.0f), jitter %.1f ms, loss %.1f %%, %d spike%s\n", avg, mn, mx, js / k, ls / n, sp, (sp == 1 ? "" : "s")
+			else print "No ping replies during the match"
+			printf "Data %.1f MB", bytes / 1048576
+		}' "$f")
 	tail -n "$KEEP_MATCHES" $DATA/matches.jsonl > $DATA/matches.tmp 2>/dev/null && mv $DATA/matches.tmp $DATA/matches.jsonl
 	rm -f "$f"
-	[ $(($3 - $2)) -ge "$MIN_MATCH" ] && logger -t netmode "match over: $1, $(($3 - $2)) s on $GW"
+	if [ -n "$summary" ]; then
+		logger -t netmode "match over: $1, $(($3 - $2)) s on $GW"
+		notify match "$summary"
+	fi
 }
 
 # per-device state lives in variables named after the device: lb_<key> (last busy tick), ms_<key> / ml_<key>
@@ -281,6 +323,8 @@ case "$MODE" in game) EFF=game ;; all) EFF=all ;; esac
 apply_sets
 load_names
 logger -t netmode "start: mode $MODE ($EFF), game WAN $GW, devices $GAME_IPS, probe target $TARGET ($TARGET_SRC)"
+BUSY=""; lag=0; last_alert=0
+notify start "▶️ netmode started on $(uci -q get system.@system[0].hostname): mode $MODE, game WAN $GW."
 
 : > $RUN/flows.prev; udp_delta "$GAME_IPS" $RUN/flows.prev > /dev/null
 last_tick=$now; last_probe=0; better=0; dead=0; warned=""; LP=""; how=""; l_asked=""
@@ -367,6 +411,21 @@ while true; do
 				[ "$ml" -gt "$M_LAST" ] && M_LAST=$ml
 			fi
 		done
+
+		# lag alert: during a match the game WAN is slow (>= alert_ping ms) or losing packets (>= alert_loss %)
+		# for alert_after intervals in a row; then quiet for alert_cooldown s
+		if [ -n "$M_FIRST" ] && [ "$LIVE_PING" = 1 ] && [ -n "$P_LOSS" ]; then
+			if [ "$P_AVG" = - ] || [ "${P_AVG%.*}" -ge "$ALERT_PING" ] || [ "$P_LOSS" -ge "$ALERT_LOSS" ]; then lag=$((lag + 1)); else lag=0; fi
+			if [ "$lag" -ge "$ALERT_AFTER" ] && [ $((now - last_alert)) -ge "$ALERT_COOLDOWN" ]; then
+				last_alert=$now; lag=0
+				alt=$(awk -v g="$GW" '$1 != g && $3 < 100 && (b == "" || $2 < bp) { b = $1; bp = $2 } END { if (b != "") print b " (" bp " ms)" }' $RUN/probe 2>/dev/null)
+				if [ "$P_AVG" = - ]; then now_txt="no ping replies"; else now_txt="${P_AVG%.*} ms, $P_LOSS % loss"; fi
+				notify alert "⚠️ Lag on the game WAN $GW during the match: $now_txt (bad for the last $((ALERT_AFTER * INTERVAL)) s).${alt:+
+Fastest other WAN: $alt — switch in LuCI → Services → Netmode.}"
+			fi
+		else
+			lag=0
+		fi
 
 		echo "$now $UDP $P_AVG ${P_LOSS:--} $EFF $GW ${DEV_UDP:--}" >> $RUN/hist
 		tail -n $HIST $RUN/hist > $RUN/hist.tmp && mv $RUN/hist.tmp $RUN/hist

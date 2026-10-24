@@ -34,6 +34,32 @@ plentiful but each one's latency collapses as soon as somebody downloads on it.
   the ping over the match.
 - **Live data** — a sampler pings through the game WAN once per second and records each gaming device's upload
   (last 15 min); the daemon keeps 3 h of 10 s points and every probe round.
+- **Telegram notifications** (optional) — game mode on/off, game-WAN changes, a report after each match, and an
+  alert when the game WAN lags during a match (with the fastest other WAN to switch to).
+
+## Notifications
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
+2. Start a chat with the bot (or add it to a group) and get the chat id (e.g. from
+   `https://api.telegram.org/bot<token>/getUpdates` after sending it a message; group ids are negative).
+3. In **Services → Netmode → Settings → Notifications**, switch Telegram on, enter the token and chat id, choose the
+   events, save, and press **Send test message**.
+
+Example messages:
+
+```
+🎮 Game mode on — PC playing
+Game WAN: wan4 (94 ms). Everyone else is on the other WANs.
+
+🏁 Match over — PC: 23 min on wan4
+Ping 96 ms avg (88–160), jitter 4.1 ms, loss 0.0 %, 2 spikes
+Data 48.2 MB
+
+⚠️ Lag on the game WAN wan4 during the match: 820 ms, 20 % loss (bad for the last 30 s).
+Fastest other WAN: wan2 (85 ms) — switch in LuCI → Services → Netmode.
+```
+
+The token is stored only in `/etc/config/netmode` on the router.
 
 ## LuCI
 
@@ -107,6 +133,10 @@ netmode matches [n]         the last n match reports
 | `default_target` | `8.8.8.8` | probe target when nothing better answers ping |
 | `live_ping` | `1` | pings through the game WAN for the graphs (1 per second + 5 per interval) |
 | `min_match` / `keep_matches` | `60` / `200` | match reports |
+| `telegram` | `0` | Telegram notifications on / off |
+| `telegram_token` / `telegram_chat` | — | bot token (from @BotFather) and chat id |
+| `notify` (list) | `mode gw match alert` | events to send: `mode`, `gw`, `match`, `alert`, `start` |
+| `alert_ping` / `alert_loss` / `alert_after` / `alert_cooldown` | `200` / `20` / `3` / `300` | lag alert: ping ms or loss % for N intervals during a match; at most one per cooldown s |
 
 ## API
 
@@ -120,6 +150,7 @@ rpcd object `netmode` (`ubus call netmode <method>`), used by the LuCI pages:
 | `matches {"limit": n}` | match reports, newest first |
 | `set {"mode": …}` / `set {"gw": …}` | change the mode / the game WAN |
 | `clear_matches` | delete the match reports |
+| `notify_test` | send a Telegram test message with the saved settings |
 
 ## Layout
 
@@ -132,6 +163,7 @@ files/                                         installed as-is on the router
 ├── usr/sbin/netmode                           command line
 ├── usr/lib/netmode/common.sh                  shared shell functions
 ├── usr/libexec/netmode/mwan3-rules            builds / removes the mwan3 policies and rules
+├── usr/libexec/netmode/notify                 Telegram sender
 ├── usr/libexec/rpcd/netmode                   ubus API
 ├── usr/share/rpcd/acl.d/luci-app-netmode.json
 ├── usr/share/luci/menu.d/luci-app-netmode.json
