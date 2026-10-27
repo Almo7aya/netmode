@@ -17,6 +17,22 @@ load() {
 	config_get GAME_IPS main game_ip ""
 	config_get DEFAULT_TARGET main default_target 8.8.8.8
 	config_get_bool LIVE main live_ping 1
+	RELAY_STATUS=""
+	config_list_foreach main relay_status add_relay_status
+}
+add_relay_status() { RELAY_STATUS="$RELAY_STATUS $1"; }
+
+# a relay's status page ("wan:url", e.g. its current cap) while it is the game WAN and a dashboard is open: every
+# 2 s into $RUN/relay_status as {"wan":..,"status":<page>}
+relay_status() {  # $1 game WAN, $2 viewed
+	url=""
+	for x in $RELAY_STATUS; do [ "${x%%:*}" = "$1" ] && url=${x#*:}; done
+	if [ -z "$url" ] || [ "$2" != 1 ]; then rm -f $RUN/relay_status; return; fi
+	[ $((n % 2)) = 0 ] || return
+	(
+		s=$(curl -s -m 2 "$url" 2>/dev/null)
+		case "$s" in "{"*) printf '{"wan":"%s","status":%s}\n' "$1" "$s" > $RUN/relay_status.tmp && mv $RUN/relay_status.tmp $RUN/relay_status ;; esac
+	) &
 }
 
 mkdir -p $RUN
@@ -37,6 +53,7 @@ while true; do
 
 	rm -f "$RUN/live.ping.$slot"
 	viewed=0; [ -f $RUN/viewer ] && [ $((now - $(date -r $RUN/viewer +%s))) -lt 30 ] && viewed=1
+	relay_status "$gw" $viewed
 	if [ "$LIVE" = 1 ] && [ -n "$dev" ] && [ $viewed = 1 ]; then
 		ping -I "$dev" -c 1 -W 2 "$tgt" > "$RUN/live.ping.$slot" 2>/dev/null &
 		eval "pp_$slot=$!"

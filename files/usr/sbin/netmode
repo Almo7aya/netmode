@@ -47,9 +47,11 @@ case "$1" in
 	matches)
 		tail -n "${2:-10}" /etc/netmode/matches.jsonl 2>/dev/null | while read -r m; do
 			f() { jsonfilter -s "$m" -e "$1"; }
-			printf '%s  %-15s %4s min  %-10s %-12s ping %5s ms  jitter %4s  loss %4s%%  spikes %s  %s MB\n' \
-				"$(date -d "@$(f @.start)" '+%m-%d %H:%M')" "$(f @.device)" "$(( $(f @.dur) / 60 ))" "$(f @.gw)" \
-				"$(f @.region_name | tr ' ' '_')" "$(f @.ping)" "$(f @.jitter)" "$(f @.loss)" "$(f @.spikes)" "$(f @.mb)"
+			lp=$(f @.load_peak); ls=$(f @.load_secs)
+			printf '%s  %-15s %4s min  %-10s %-4s %-12s ping %5s ms  jitter %4s  loss %4s%%  spikes %-3s  up %s MB  down %s MB  load %s\n' \
+				"$(date -d "@$(f @.start)" '+%m-%d %H:%M')" "$(f @.device)" "$(( $(f @.dur) / 60 ))" "$(f @.gw)" "$(f @.provider)" \
+				"$(f @.region_name | tr ' ' '_')" "$(f @.ping)" "$(f @.jitter)" "$(f @.loss)" "$(f @.spikes)" "$(f @.mb)" "$(f @.down_mb)" \
+				"$([ -z "$lp" ] && echo - || { [ "${ls:-0}" -gt 0 ] && echo "peak ${lp} KB/s ${ls} s" || echo "none"; })"
 		done ;;
 	*) echo "usage: netmode auto|game|all | gw auto|<wan> | status | matches [n]"; exit 1 ;;
 esac

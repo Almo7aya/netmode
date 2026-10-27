@@ -351,13 +351,28 @@ Game WAN: $(lbl "$GW")$(ping_of "$GW"). Everyone else is on the other WANs."
 name_of() { awk -v ip="$1" '$1 == ip { n = $2 } END { print (n == "" ? "-" : n) }' $RUN/names 2>/dev/null; }
 names_of() { for ip in "$@"; do n=$(name_of "$ip"); [ "$n" = - ] && n=$ip; printf '%s, ' "$n"; done | sed 's/, $//'; }
 
+# the device's UDP download around a match, from the 10 s history: "total_MB load_MB load_peak_KBps load_secs".
+# The load window starts 3 min before the match (loading a match comes before match-level upload) and ends 2 min
+# into it; load_secs counts the seconds at >= LOAD_KBPS (a map download burst).
+LOAD_KBPS=300
+download_of() {  # $1 = device ip, $2 = start, $3 = last busy tick
+	awk -v ip="$1" -v s="$2" -v e="$3" -v iv="$INTERVAL" -v lim="$LOAD_KBPS" '
+		$1 >= s - 180 && $1 <= e && $8 != "" {
+			v = 0; n = split($8, a, ","); for (i = 1; i <= n; i++) { split(a[i], kv, "="); if (kv[1] == ip) v = kv[2] + 0 }
+			if ($1 >= s) tot += v
+			if ($1 <= s + 120) { lt += v; if (v > pk) pk = v; if (v / iv / 1024 >= lim) ls += iv }
+		}
+		END { printf "%.1f %.1f %d %d", tot / 1048576, lt / 1048576, pk / iv / 1024, ls }' $RUN/hist 2>/dev/null
+}
+
 # one JSON line per match in $DATA/matches.jsonl from the per-tick samples in $RUN/match.<key>
 # ("ts gw udp avg min max jitter loss"); the quiet tail after the last busy tick is not part of the match
 match_end() {  # $1 = device ip, $2 = start, $3 = last busy tick
 	k=$(key_of "$1"); f=$RUN/match.$k; summary=""
+	dl=$(download_of "$1" "$2" "$3"); [ -n "$dl" ] || dl="0 0 0 0"
 	[ -s "$f" ] && summary=$(awk -v start="$2" -v last="$3" -v min="$MIN_MATCH" -v iv="$INTERVAL" -v ip="$1" -v nm="$(name_of "$1")" \
 			-v srv="$SERVER" -v tgt="$TARGET" -v tsrc="$TARGET_SRC" -v out=$DATA/matches.jsonl -v lf=$RUN/labels \
-			-v reg="${RID:--}" -v rname="$(echo "${RNAME:--}" | tr '_' ' ')" '
+			-v reg="${RID:--}" -v rname="$(echo "${RNAME:--}" | tr '_' ' ')" -v prov="${RPROV:--}" -v dl="$dl" -v lim="$LOAD_KBPS" '
 		BEGIN { while ((getline l < lf) > 0) { w = l; sub(/ .*/, "", w); sub(/^[^ ]+ +/, "", l); lab[w] = l } }
 		$1 > last { next }
 		{
@@ -377,17 +392,21 @@ match_end() {  # $1 = device ip, $2 = start, $3 = last busy tick
 				start, last, dur, ip, nm, gws, sw, srv, reg, rname, tgt, tsrc, bytes / 1048576)
 			if (k) j = j sprintf("\"ping\":%.1f,\"min\":%.1f,\"max\":%.1f,\"jitter\":%.1f,", avg, mn, mx, js / k)
 			else j = j "\"ping\":null,\"min\":null,\"max\":null,\"jitter\":null,"
-			j = j sprintf("\"loss\":%.1f,\"spikes\":%d,\"interval\":%d,\"series\":[", ls / n, sp, iv)
+			split(dl, D, " ")
+			j = j sprintf("\"loss\":%.1f,\"spikes\":%d,\"provider\":\"%s\",\"down_mb\":%.1f,\"load_mb\":%.1f,\"load_peak\":%d,\"load_secs\":%d,\"interval\":%d,\"series\":[",
+				ls / n, sp, prov, D[1], D[2], D[3], D[4], iv)
 			for (i = 1; i <= n; i++) j = j (i > 1 ? "," : "") ser[i]
 			print j "]}" >> out
 			# the Telegram summary (WANs by their display names)
 			ng = split(gws, gw, ">"); g = ""
 			for (i = 1; i <= ng; i++) g = g (i > 1 ? " → " : "") ((gw[i] in lab) ? lab[gw[i]] : gw[i])
+			pn = (prov == "gcp") ? "Google " : (prov == "aws") ? "AWS " : ""
 			printf "🏁 Match over — %s: %s on %s%s\n", (nm != "-" ? nm : ip), (dur < 90 ? dur " s" : int(dur / 60 + 0.5) " min"), g,
-				(reg != "-" ? ", server in " rname : "")
+				(reg != "-" ? ", server in " pn rname : "")
 			if (k) printf "Ping %.0f ms avg (%.0f–%.0f), jitter %.1f ms, loss %.1f %%, %d spike%s\n", avg, mn, mx, js / k, ls / n, sp, (sp == 1 ? "" : "s")
 			else print "No ping replies during the match"
-			printf "Data %.1f MB", bytes / 1048576
+			printf "Data %.1f MB up, %.1f MB down", bytes / 1048576, D[1]
+			if (D[4] > 0) printf "\nLoading burst: %.1f MB, peak %d KB/s, %d s at %d+ KB/s", D[2], D[3], D[4], lim
 		}' "$f")
 	tail -n "$KEEP_MATCHES" $DATA/matches.jsonl > $DATA/matches.tmp 2>/dev/null && mv $DATA/matches.tmp $DATA/matches.jsonl
 	rm -f "$f"

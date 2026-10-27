@@ -135,6 +135,15 @@ return view.extend({
 			return !value || /^[A-Za-z0-9_]+:[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$/.test(value) ? true : _('Use wan:wan,wan');
 		};
 
+		o = s.taboption('general', form.DynamicList, 'relay_status', _('Relay status pages'),
+			_('<code>relay:http://10.77.0.1:8780/</code>: a relay\'s own status page (JSON, e.g. an adaptive cap with <code>cap</code>, ' +
+			  '<code>floor</code>, <code>ceiling</code>, <code>sending</code> in kbit/s), shown on the dashboard while that relay is the ' +
+			  'game WAN. Fetched every 2 s, only while a dashboard is open.'));
+		o.placeholder = 'relay:http://10.77.0.1:8780/';
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Za-z0-9_]+:https?:\/\/\S+$/.test(value) ? true : _('Use wan:http://address:port/');
+		};
+
 		o = s.taboption('general', form.DynamicList, 'weight', _('WAN weights'),
 			_('Load-balancing weight per WAN as <code>wan:weight</code>, e.g. <code>wan1:4</code>; unlisted WANs get 1. ' +
 			  'Changing this rebuilds the mwan3 rules.'));

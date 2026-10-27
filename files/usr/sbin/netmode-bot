@@ -171,9 +171,12 @@ function matchesText(n) {
 	let l = [ '🏁 Last matches' ];
 	for (let i = 0; i < length(ms); i++) {
 		let m = ms[i], t = localtime(m.start);
-		push(l, sprintf('%s/%s %s · %s · %d min · %s · %s', pad(t.mday), pad(t.mon), hhmm(m.start),
+		let cloud = m.provider == 'gcp' ? 'Google' : m.provider == 'aws' ? 'AWS' : null;
+		push(l, sprintf('%s/%s %s · %s · %d min · %s · %s%s%s', pad(t.mday), pad(t.mon), hhmm(m.start),
 			(m.name && m.name != '-') ? m.name : (m.device || '?'), int(m.dur / 60 + 0.5), join(' → ', map(split(m.gw || '?', '>'), wl)),
-			m.ping != null ? sprintf('%.0f ms, jitter %.1f, loss %.1f %%', m.ping, m.jitter, m.loss) : 'no ping'));
+			m.ping != null ? sprintf('%.0f ms, jitter %.1f, loss %.1f %%', m.ping, m.jitter, m.loss) : 'no ping',
+			cloud ? ' · ' + cloud + (m.region_name && m.region_name != '-' ? ' ' + m.region_name : '') : '',
+			m.load_secs > 0 ? sprintf(' · loading burst %d KB/s for %d s', m.load_peak, m.load_secs) : ''));
 	}
 	return join('\n', l);
 }

@@ -1,6 +1,7 @@
 #!/bin/sh
 # rpcd plugin for netmode (LuCI widget + pages, other dashboards):
 #   ubus call netmode status                    current state (/var/run/netmode/status.json) + "running"
+#                                               (+ "relay": {wan, status}: the game WAN relay's status page)
 #   ubus call netmode history '{"since":0}'      graph points after "since" (oldest first, up to 3 h):
 #       points: [ts, udp_total, ping|null, loss|null, state, gw, {device_ip: udp_up}, {device_ip: udp_down}]
 #                                                                                    (every interval)
@@ -25,9 +26,11 @@ call)
 	read -r input
 	case "$2" in
 	status)
-		S=$RUN/status.json
+		S=$RUN/status.json; RS=$RUN/relay_status
 		if [ -s $S ] && [ -f $RUN/pid ] && [ $(( $(date +%s) - $(date -r $S +%s) )) -lt 120 ]; then
-			sed '1s/^{/{"running":true,/' $S
+			# + the game WAN relay's status page, when the sampler fetched it in the last 10 s
+			rl=""; [ -s $RS ] && [ $(( $(date +%s) - $(date -r $RS +%s) )) -lt 10 ] && rl="\"relay\":$(cat $RS),"
+			printf '{"running":true,%s' "$rl"; tail -c +2 $S
 		else
 			echo '{"running":false}'
 		fi

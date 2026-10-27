@@ -34,19 +34,29 @@ udp_flows() {
 
 # bytes since the previous call that used the same snapshot file $2 (flows that ended in between are not lost),
 # the busiest flow, and bytes per device: prints "total top_bytes top_dst ip=up,ip=up,... ip=down,ip=down,..."
-# (total and top: upload, the game detection's measure)
-udp_delta() {  # $1 = device IPs, $2 = snapshot file
+# (total and top: upload, the game detection's measure). Entries with the same flow key are summed, and a flow
+# missing from one read of the conntrack table stays in the snapshot for 3 more calls: otherwise its whole total
+# would count again when it shows up the next time (a one-second "download" of several MB).
+udp_delta() {  # $1 = device IPs, $2 = snapshot file ("up dst key src down age" per flow)
 	udp_flows "$1" > "$2.cur"
-	awk -v pf="$2" -v ips="$1" '
-		BEGIN { while ((getline l < pf) > 0) { split(l, a, " "); p[a[3]] = a[1]; pd[a[3]] = a[5] + 0 } }
-		{
-			d = $1 - (($3 in p) ? p[$3] : 0); if (d < 0) d = $1; t += d; dev[$4] += d; if (d > m) { m = d; dst = $2 }
-			dd = $5 - (($3 in pd) ? pd[$3] : 0); if (dd < 0) dd = $5; down[$4] += dd
+	awk -v pf="$2" -v ips="$1" -v nf="$2.new" '
+		BEGIN {
+			printf "" > nf
+			while ((getline l < pf) > 0) { split(l, a, " "); p[a[3]] = a[1]; pd[a[3]] = a[5] + 0; pl[a[3]] = l; age[a[3]] = a[6] + 0 }
 		}
+		{ up[$3] += $1; dn[$3] += $5; dst[$3] = $2; src[$3] = $4 }
 		END {
+			for (k in up) {
+				d = up[k] - ((k in p) ? p[k] : 0); if (d < 0) d = up[k]
+				dd = dn[k] - ((k in pd) ? pd[k] : 0); if (dd < 0) dd = dn[k]
+				t += d; dev[src[k]] += d; down[src[k]] += dd; if (d > m) { m = d; top = dst[k] }
+				print up[k], dst[k], k, src[k], dn[k], 0 > nf
+			}
+			for (k in p) if (!(k in up) && age[k] < 3) { split(pl[k], a, " "); print a[1], a[2], k, a[4], a[5] + 0, age[k] + 1 > nf }
 			n = split(ips, a, " ")
 			for (i = 1; i <= n; i++) { s = s (i > 1 ? "," : "") a[i] "=" (dev[a[i]] + 0); sd = sd (i > 1 ? "," : "") a[i] "=" (down[a[i]] + 0) }
-			printf "%d %d %s %s %s\n", t, m, (dst == "" ? "-" : dst), (s == "" ? "-" : s), (sd == "" ? "-" : sd)
+			printf "%d %d %s %s %s\n", t, m, (top == "" ? "-" : top), (s == "" ? "-" : s), (sd == "" ? "-" : sd)
 		}' "$2.cur"
-	mv "$2.cur" "$2"
+	mv "$2.new" "$2"
+	rm -f "$2.cur"
 }

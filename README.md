@@ -38,8 +38,10 @@ match server see the same public IP.)
   about a second). During a match, when another candidate is clearly faster, netmode asks on Telegram with a
   **Switch** button (`match_switch ask`), switches by itself (`auto`), or waits for the match to end (`off`).
 - **Match reports** — per device, while it uploads ≥ 50 KB per 10 s (well above lobby and loading traffic; a
-  match ends after 30 s below that): length, game WAN, server region, average / min / max ping, jitter, loss,
-  spikes (≥ 50 ms above the match average), data used and the ping over the match.
+  match ends after 30 s below that): length, game WAN, the game server's cloud (Google Cloud / AWS) and region,
+  average / min / max ping, jitter, loss, spikes (≥ 50 ms above the match average), data up and down, the ping
+  over the match, and the loading burst: the UDP download from 3 min before the match to 2 min into it, when it
+  reaches 300 KB/s (a map download that can choke a mobile link). A table compares the clouds.
 - **Live data** — a sampler records each gaming device's UDP upload and download every second (last 15 min) and,
   while a dashboard is open, pings through the game WAN once per second; the daemon keeps 3 h of 10 s points and
   every probe round.
@@ -191,6 +193,7 @@ netmode matches [n]         the last n match reports
 | `cands` (list) | the normal `wans` | WANs `auto` chooses from |
 | `weight` (list) | 1 each | load-balancing weight, `wan:weight` (e.g. `wan1:4`) |
 | `label` (list) | interface names | display names for the dashboard, match reports and Telegram, `wan:name` (e.g. `wan1:Fibre`) |
+| `relay_status` (list) | — | `wan:url` of a relay's status page (JSON: `cap`, `floor`, `ceiling`, `sending` in kbit/s, `ping`, `baseline` in ms, `busy`), shown as a tile while that relay is the game WAN; fetched every 2 s while a dashboard is open |
 | `move_flows` | `1` | move running matches when the game WAN changes |
 | `thresh` | `8000` | UDP bytes uploaded per interval that start game mode |
 | `match_thresh` | `50000` | UDP bytes per interval that count as a match (reports) |

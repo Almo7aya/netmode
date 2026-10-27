@@ -130,7 +130,9 @@ var hoverHide = function() {};
 return baseclass.extend({
 	S: S,
 	hhmm: hhmm,
-	color: function(i) { return 'var(--nm-c' + ((i % 8) + 1) + ')'; },
+	// series colours in this slot order: green (slot 6) comes last, as it sits too close to aqua (slot 3) when every
+	// line can cross every other (the WAN pings); violet (7) is far from slots 2-5
+	color: function(i) { return 'var(--nm-c' + [ 1, 2, 3, 4, 5, 7, 8, 6 ][i % 8] + ')'; },
 
 	status: function() { return L.resolveDefault(callStatus(), { running: false }); },
 	history: function(since) { return L.resolveDefault(callHistory(since || 0), { points: [], probes: [] }); },
@@ -215,11 +217,12 @@ return baseclass.extend({
 	/* A time-series chart drawn in a shared time frame (so several charts line up under one crosshair).
 	 * sp: { W, H, frame: { L, R, t0, t1 }, unit, zero (y axis from 0), robust (rare spikes above the scale are clipped
 	 *       and marked), minSpan (smallest y range), thresh: { v, label, dash } or a list of them (reference lines),
+	 *       title (a small label inside the plot, top left), xAxis: false (no time labels: a panel above another),
 	 *       series: [{ label, color, pts: [[ts, v|null]], area, markers, dash, tol (s, hover snapping) }],
 	 *       bands: [[ts0, ts1]] (shaded), marks: [{ ts, label }] (vertical markers), loss: [ts] (red ticks on top) }
 	 * returns { svg, show(ts), hide() } */
 	chart: function(sp) {
-		var f = sp.frame, W = sp.W, H = sp.H, top = 18, bottom = 22, span = f.t1 - f.t0;
+		var f = sp.frame, W = sp.W, H = sp.H, top = 18, bottom = sp.xAxis === false ? 6 : 22, span = f.t1 - f.t0;
 		var x = function(ts) { return f.L + (ts - f.t0) / span * (W - f.L - f.R); };
 
 		var vals = [];
@@ -253,7 +256,7 @@ return baseclass.extend({
 				'font-size': 11, 'style': 'font-variant-numeric:tabular-nums' }, [ fmt(v) + (v + step > y1 + 1e-9 ? ' ' + sp.unit : '') ]));
 		}
 		var ts = [ 60, 120, 300, 600, 900, 1800, 3600 ].filter(function(s) { return span / s <= 6; })[0] || 3600;
-		for (var t = Math.ceil(f.t0 / ts) * ts; t <= f.t1; t += ts) {
+		for (var t = Math.ceil(f.t0 / ts) * ts; sp.xAxis !== false && t <= f.t1; t += ts) {
 			svg.appendChild(S('line', { 'x1': x(t), 'x2': x(t), 'y1': H - bottom, 'y2': H - bottom + 4, 'stroke': 'var(--nm-axis)' }));
 			svg.appendChild(S('text', { 'x': x(t), 'y': H - 5, 'text-anchor': 'middle', 'fill': 'currentColor', 'fill-opacity': 0.55, 'font-size': 11 }, [ hhmm(t) ]));
 		}
@@ -267,18 +270,22 @@ return baseclass.extend({
 				lastLabel = xx;
 			}
 		});
-		// reference lines, labelled (when they have a label) above the line at the right end, or at the left end when
-		// that would touch another label
-		var labelYs = [];
+		// reference lines, labelled (when they have a label) above the line at the left end, or at the right end when
+		// that would touch another label; a halo in the surface colour keeps a label readable over the series
+		// (the lines go under the series, the labels and the title on top of them)
+		var labelYs = [], overlay = [], halo = { 'stroke': 'var(--nm-ring, Canvas)', 'stroke-width': 3, 'stroke-linejoin': 'round', 'paint-order': 'stroke' };
 		threshs.forEach(function(t) {
-			var ty = y(t.v), left = labelYs.some(function(o) { return Math.abs(o - ty) < 14; });
+			var ty = y(t.v), right = labelYs.some(function(o) { return Math.abs(o - ty) < 14; });
 			svg.appendChild(S('line', { 'x1': f.L, 'x2': W - f.R, 'y1': ty, 'y2': ty, 'stroke': 'currentColor',
-				'stroke-opacity': 0.5, 'stroke-dasharray': t.dash || '5 4' }));
+				'stroke-opacity': 0.7, 'stroke-dasharray': t.dash || '5 4' }));
 			if (!t.label) return;
-			svg.appendChild(S('text', { 'x': left ? f.L + 6 : W - f.R, 'y': ty - 5, 'text-anchor': left ? 'start' : 'end', 'fill': 'currentColor',
-				'fill-opacity': 0.65, 'font-size': 11 }, [ t.label ]));
-			if (!left) labelYs.push(ty);
+			overlay.push(S('text', Object.assign({ 'x': right ? W - f.R - 4 : f.L + 6, 'y': ty - 4, 'text-anchor': right ? 'end' : 'start',
+				'fill': 'currentColor', 'fill-opacity': 0.85, 'font-size': 11 }, halo), [ t.label ]));
+			if (!right) labelYs.push(ty);
 		});
+		if (sp.title)
+			overlay.push(S('text', Object.assign({ 'x': f.L + 6, 'y': top + 13, 'fill': 'currentColor', 'fill-opacity': 0.8, 'font-size': 11,
+				'font-weight': 600 }, halo), [ sp.title ]));
 
 		// series: area wash, 2px line, optional point markers; gaps where a value is missing
 		sp.series.forEach(function(s) {
@@ -310,6 +317,7 @@ return baseclass.extend({
 			if (lt < f.t0) return;
 			svg.appendChild(S('line', { 'x1': x(lt), 'x2': x(lt), 'y1': top, 'y2': top + 7, 'stroke': 'var(--nm-crit)', 'stroke-width': 2, 'stroke-linecap': 'round' }));
 		});
+		overlay.forEach(function(n) { svg.appendChild(n); });
 
 		var cross = S('line', { 'y1': top - 6, 'y2': H - bottom, 'stroke': 'currentColor', 'stroke-opacity': 0.5, 'visibility': 'hidden', 'pointer-events': 'none' });
 		svg.appendChild(cross);
@@ -547,12 +555,21 @@ return baseclass.extend({
 			var devTile = tile(_('Gaming devices · UDP'), '↑ ' + kbs(total) + '  ↓ ' + kbs(totalDown), 'KB/s', devs.length ? devs.map(function(x) {
 				return E('div', {}, [ nm.devName(x) + ': ↑ ' + kbs(rate(x.ip)) + ' · ↓ ' + kbs(rate(x.ip, 'down')) + ' KB/s' + (x.playing ? ' · ' + _('playing') : '') ]);
 			}) : [ E('a', { 'href': L.url('admin/services/netmode/settings') }, [ _('pick your gaming devices in Settings') ]) ]);
-			if (kiosk)
-				tiles.replaceChildren(
+			// the game WAN relay's own status page (relay_status), e.g. an adaptive cap toward this router
+			var rl = st.relay && st.relay.wan == st.gw && st.relay.status, mbit = function(k) { return (k / 1000).toFixed(1); };
+			var relayTile = rl && rl.cap != null ? tile(_('Relay cap'), mbit(rl.cap), 'Mbit/s', [
+				rl.busy ? _('adapting: a burst is coming through') : _('waiting at the start value'),
+				E('div', {}, [ _('range %s–%s · sending %s Mbit/s').format(mbit(rl.floor), mbit(rl.ceiling), mbit(rl.sending || 0)) ]),
+				rl.ping != null ? E('div', {}, [ _('tunnel ping %d ms (unloaded %d)').format(rl.ping, rl.baseline) ]) : '' ]) : null;
+			if (kiosk) {
+				var kt = [
 					tile(_('Ping now'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms', [ _('via %s · 1 ping per second').format(gw) ]),
 					tile(_('Avg · 60 s'), s.avg != null ? String(Math.round(s.avg)) : '—', s.avg != null ? 'ms' : '', [ _('10 s median on the graph') ]),
 					tile(_('Jitter · loss · 60 s'), s.jitter != null ? s.jitter.toFixed(1) : '—', 'ms', [ _('loss %s %%').format(s.loss != null ? s.loss.toFixed(1) : '—') ]),
-					devTile, match);
+					devTile, match ].concat(relayTile ? [ relayTile ] : []);
+				tiles.style.gridTemplateColumns = innerWidth > 1100 ? 'repeat(' + kt.length + ',minmax(0,1fr))' : '';
+				tiles.replaceChildren.apply(tiles, kt);
+			}
 			else
 				tiles.replaceChildren(
 					tile(_('Game WAN ping'), pingNow, pingNow == '—' || pingNow == _('lost') ? '' : 'ms',
@@ -562,7 +579,8 @@ return baseclass.extend({
 					st.probe_kind == 'region' && st.region
 						? tile(_('Game region'), st.region.name, '', [ (st.region.provider == 'gcp' ? 'Google Cloud ' : 'AWS ') + st.region.id +
 							(st.server && st.server != '-' ? ' · ' + _('server %s').format(st.server) : '') + ' · ' + _('WAN pings measure this region') ])
-						: tile(_('Probe target'), st.target, '', [ (SRC[st.target_src] || st.target_src) + (st.target_src != 'server' && st.server && st.server != '-' ? ' · ' + _('game server %s').format(st.server) : '') ]));
+						: tile(_('Probe target'), st.target, '', [ (SRC[st.target_src] || st.target_src) + (st.target_src != 'server' && st.server && st.server != '-' ? ' · ' + _('game server %s').format(st.server) : '') ]),
+					relayTile || '');
 		};
 
 		var drawCharts = function() {
@@ -660,21 +678,22 @@ return baseclass.extend({
 				upNow[ip] = avg.dev[ip][tLast] || 0; downNow[ip] = avg.down[ip][tLast] || 0;
 				totalUp += upNow[ip]; totalDown += downNow[ip]; topNow = Math.max(topNow, upNow[ip]);
 			});
-			// unlabelled in the plot (the labels sat on the newest data): the legend names both dash patterns
-			var levels = [ { v: gmKB, dash: '2 3' } ];
-			if (mKB > gmKB) levels.push({ v: mKB, dash: '7 4' });
-			var mstart = st.match && st.match.start > t0 ? [ { ts: st.match.start, label: _('match start') } ] : [];
-			var udpSeries = [];
-			devs.forEach(function(ip, i) {
-				var nmd = one ? '' : (names[ip] || ip) + ' ';
-				udpSeries.push({ label: nmd + _('download'), color: downColor(i), dash: one ? null : '6 3', tol: step * 1.5,
-					pts: rs.map(function(r) { return [ r.ts, avg.down[ip][r.ts] ]; }) });
-				udpSeries.push({ label: nmd + _('upload'), color: upColor(i), area: one, tol: step * 1.5,
-					pts: rs.map(function(r) { return [ r.ts, avg.dev[ip][r.ts] ]; }) });
-			});
-			sz = size(cells.udp, 170);
-			var c2 = nm.chart({ W: sz.W, H: sz.H, frame: frame(sz), unit: 'KB/s', zero: true, robust: true, minSpan: 2, bands: bands,
-				marks: mstart, thresh: levels, series: udpSeries });
+			// two panels on one time axis, each with its own scale (the upload is ~20 KB/s in a match, a loading download
+			// a few hundred): download on top, upload below against the game mode and match levels
+			var levels = [ { v: gmKB, label: _('game mode %s KB/s').format(kbs(gmKB)), dash: '2 3' } ];
+			if (mKB > gmKB) levels.push({ v: mKB, label: _('match %s KB/s').format(kbs(mKB)), dash: '7 4' });
+			var mstart = st.match && st.match.start > t0 ? st.match.start : null;
+			var udpSeries = function(dir, color, dash) {
+				return devs.map(function(ip, i) {
+					return { label: (one ? '' : (names[ip] || ip) + ' ') + (dir == 'dev' ? _('upload') : _('download')), color: color(i),
+						dash: one ? null : dash, area: one, tol: step * 1.5, pts: rs.map(function(r) { return [ r.ts, avg[dir][ip][r.ts] ]; }) };
+				});
+			};
+			var udpW = size(cells.udp, 0).W, udpH = kiosk ? Math.max(140, cells.udp.plot.clientHeight) : 260, downH = Math.round(udpH * 0.46);
+			var c2d = nm.chart({ W: udpW, H: downH, frame: frame(), unit: 'KB/s', zero: true, robust: true, minSpan: 10, bands: bands, xAxis: false,
+				marks: mstart ? [ { ts: mstart, label: _('match start') } ] : [], title: '↓ ' + _('download'), series: udpSeries('down', downColor, '6 3') });
+			var c2u = nm.chart({ W: udpW, H: udpH - downH, frame: frame(), unit: 'KB/s', zero: true, robust: true, minSpan: 2, bands: bands,
+				marks: mstart ? [ { ts: mstart } ] : [], thresh: levels, title: '↑ ' + _('upload (game detection)'), series: udpSeries('dev', upColor, null) });
 			head(cells.udp, _('Gaming devices UDP traffic'), _('KB/s · 10 s average · game detection counts the upload · DNS, NTP, QUIC and LAN not counted'),
 				'↑ ' + kbs(totalUp) + '  ↓ ' + kbs(totalDown), 'KB/s',
 				mKB > gmKB && topNow >= mKB ? _('upload at match level') : topNow >= gmKB ? _('upload at game mode level (lobby, loading)') : _('upload below the game mode level'));
@@ -684,14 +703,13 @@ return baseclass.extend({
 				uleg.push([ nm.lineKey(upColor(i)), nmd + '↑ ' + _('upload'), kbs(upNow[ip]) + ' KB/s' ]);
 				uleg.push([ nm.lineKey(downColor(i), one ? null : '6 3'), nmd + '↓ ' + _('download'), kbs(downNow[ip]) + ' KB/s' ]);
 			});
-			uleg.push([ nm.lineKey('currentColor', '2 3'), _('game mode level: upload ≥ %s KB/s').format(kbs(gmKB)) ]);
-			if (mKB > gmKB) uleg.push([ nm.lineKey('currentColor', '7 4'), _('match level: upload ≥ %s KB/s').format(kbs(mKB)) ]);
-			if (mstart.length) uleg.push([ nm.markKey(), _('match start') ]);
+			uleg.push([ nm.lineKey('currentColor', '7 4'), _('game mode / match level (upload)') ]);
+			if (mstart) uleg.push([ nm.markKey(), _('match start') ]);
 			if (bands.length) uleg.push([ nm.bandKey(), _('game mode') ]);
-			if (c2.clipped) uleg.push([ nm.spikeKey(), _('burst above the scale') ]);
+			if (c2d.clipped || c2u.clipped) uleg.push([ nm.spikeKey(), _('burst above the scale') ]);
 			cells.udp.legend.replaceChildren(nm.legend(uleg));
-			cells.udp.plot.replaceChildren(c2.svg);
-			charts.push(c2);
+			cells.udp.plot.replaceChildren(c2d.svg, c2u.svg);
+			charts.push(c2d, c2u);
 
 			// WAN pings (probe rounds)
 			if (probes.length) {
