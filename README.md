@@ -24,8 +24,8 @@ match server see the same public IP.)
 
 - **Detection** — every 10 s netmode reads the gaming devices' UDP uploads from conntrack (DNS, NTP, QUIC/443,
   SSDP/mDNS and LAN traffic don't count). From 8 KB per 10 s a device counts as playing: launching the game and its
-  lobby already start game mode, so nothing switches while a match loads. Game mode ends 5 min after the last busy
-  interval.
+  lobby already start game mode, so nothing switches while a match loads. Game mode ends 100 s after the last busy
+  interval. UDP that isn't a game (`game_ignore`, by default Discord voice calls) doesn't count.
 - **Choosing the game WAN** — netmode learns each match's server (the flow that moves ≥ 100 KB in 10 s) and looks
   up its cloud region in Google Cloud's and AWS's published address ranges. It then compares the WANs by the
   **round trip to that region** through each of them (HTTPS requests to Google's per-region test endpoint, or TCP
@@ -196,9 +196,10 @@ netmode matches [n]         the last n match reports
 | `relay_status` (list) | — | `wan:url` of a relay's status page (JSON: `cap`, `floor`, `ceiling`, `sending` in kbit/s, `ping`, `baseline` in ms, `busy`), shown as a tile while that relay is the game WAN; fetched every 2 s while a dashboard is open |
 | `move_flows` | `1` | move running matches when the game WAN changes |
 | `thresh` | `8000` | UDP bytes uploaded per interval that start game mode |
+| `game_ignore` (list) | `:19294-19344` | the gaming devices' UDP that isn't a game, as `address[/bits]`, `:port[-port]` or both: not counted for game mode or the match reports, and kept off the game WAN (the default is Discord voice calls) |
 | `match_thresh` | `50000` | UDP bytes per interval that count as a match (reports) |
 | `interval` | `10` | seconds between measurements |
-| `hold` | `300` | seconds game mode stays on after the last busy interval |
+| `hold` | `100` | seconds game mode stays on after the last busy interval |
 | `learn_min` | `100000` | bytes per interval before a flow is taken as the game server |
 | `region_probe` | `1` | compare the WANs by the round trip to the game server's cloud region (Google Cloud / AWS) |
 | `probe_every` / `idle_probe` | `60` / `900` | seconds between probe rounds while active / otherwise |

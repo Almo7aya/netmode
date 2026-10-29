@@ -23,6 +23,7 @@ load_conf() {
 	config_load netmode
 	config_get MODE main mode auto
 	config_get GAME_IPS main game_ip ""
+	config_get GAME_IGNORE main game_ignore ""
 	config_get GW_MODE main gw_mode auto
 	config_get WANS main wans ""; [ -n "$WANS" ] || WANS=$(mwan3_ifaces)
 	config_get GAME_ONLY main game_only ""
@@ -39,7 +40,7 @@ load_conf() {
 	config_get THRESH main thresh 8000
 	config_get MATCH_THRESH main match_thresh 50000
 	config_get INTERVAL main interval 10
-	config_get HOLD main hold 120
+	config_get HOLD main hold 100
 	config_get LEARN_MIN main learn_min 100000
 	config_get PROBE_EVERY main probe_every 60
 	config_get MARGIN main margin 15

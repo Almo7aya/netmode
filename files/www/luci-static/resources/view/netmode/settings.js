@@ -160,6 +160,16 @@ return view.extend({
 		o.datatype = 'uinteger';
 		o.placeholder = '8000';
 
+		o = s.taboption('detect', form.DynamicList, 'game_ignore', _('Not game traffic'),
+			_('UDP from the gaming devices that isn\'t a game: game mode and the match reports don\'t count it, and it stays ' +
+			  'off the game WAN. As <code>address/bits</code>, <code>:port-port</code> or both (<code>address/bits:port-port</code>); ' +
+			  'e.g. <code>:19294-19344</code> for Discord voice calls. Changing this rebuilds the mwan3 rules.'));
+		o.placeholder = ':19294-19344';
+		o.validate = function(section_id, value) {
+			return !value || /^(?=.)(\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?)?(:\d{1,5}(-\d{1,5})?)?$/.test(value) ? true :
+				_('Use address/bits, :port-port or both, e.g. :19294-19344');
+		};
+
 		o = s.taboption('detect', form.Value, 'match_thresh', _('Match threshold (bytes)'),
 			_('For the match reports: a match runs while a device uploads at least this much per interval (above lobby and loading traffic).'));
 		o.datatype = 'uinteger';
@@ -173,7 +183,7 @@ return view.extend({
 		o = s.taboption('detect', form.Value, 'hold', _('Hold (s)'),
 			_('Game mode stays on this long after the last busy interval (loading screens, lobbies).'));
 		o.datatype = 'range(10,3600)';
-		o.placeholder = '300';
+		o.placeholder = '100';
 
 		o = s.taboption('detect', form.Value, 'learn_min', _('Game server threshold (bytes)'),
 			_('While playing, the busiest UDP flow becomes the game server (and the probe target) once it uploads this much in one interval.'));

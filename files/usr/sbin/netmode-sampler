@@ -15,6 +15,7 @@ KEEP=900
 load() {
 	config_load netmode
 	config_get GAME_IPS main game_ip ""
+	config_get GAME_IGNORE main game_ignore ""
 	config_get DEFAULT_TARGET main default_target 8.8.8.8
 	config_get_bool LIVE main live_ping 1
 	RELAY_STATUS=""

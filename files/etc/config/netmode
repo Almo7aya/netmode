@@ -26,8 +26,11 @@ config netmode 'main'
 	# game detection: a device uploads >= thresh UDP bytes per interval seconds; game mode ends hold s later.
 	# Low on purpose: launching the game / the lobby already start game mode, so nothing switches while a match loads
 	option thresh '8000'
+	# UDP from the gaming devices that isn't a game (not counted, kept off the game WAN): 'address[/bits]',
+	# ':port[-port]' or both. Discord voice calls use UDP 19294-19344
+	list game_ignore ':19294-19344'
 	option interval '10'
-	option hold '300'
+	option hold '100'
 	# a match (match reports) needs >= match_thresh bytes per interval: above lobby and loading traffic
 	option match_thresh '50000'
 	# learn the game server from a flow once it has moved learn_min bytes in one interval

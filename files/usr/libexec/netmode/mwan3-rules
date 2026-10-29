@@ -24,7 +24,10 @@ weight() { for e in $WEIGHTS; do [ "${e%%:*}" = "$1" ] && { echo "${e#*:}"; retu
 # is the one their backend saw, so the device needs one public IP; 0: only its game UDP
 config_get_bool ALL_TRAFFIC main game_all_traffic 0
 GP=udp; [ "$ALL_TRAFFIC" = 1 ] && GP=all
-SIG="$GAME_IPS|$WANS|$WEIGHTS|$GAME_ONLY|$DEPENDS|$ALL_TRAFFIC"
+# the gaming devices' UDP that isn't game traffic (e.g. ':19294-19344', Discord voice calls): it stays off the game
+# WAN, like their other traffic ("address[/bits]", ":port[-port]" or both)
+config_get GAME_IGNORE main game_ignore ""
+SIG="$GAME_IPS|$WANS|$WEIGHTS|$GAME_ONLY|$DEPENDS|$ALL_TRAFFIC|$GAME_IGNORE"
 # mwan3 hands src_ip to iptables -s, which expands a comma list into one rule per device
 SRC=$(for ip in $GAME_IPS; do printf '%s/32,' "$ip"; done); SRC=${SRC%,}
 
@@ -89,6 +92,15 @@ gpc_rules() {  # the gaming devices -> the game WAN
 	fi
 	$UCI set "mwan3.nm_gpc_default.netmode_sig=$SIG"
 }
+ignore_rules() {  # before the gaming-device rules: what game_ignore lists uses every WAN
+	[ -n "$SRC" ] || return 0
+	i=0
+	for e in $GAME_IGNORE; do
+		i=$((i + 1)); net=${e%%:*}; ports=""; [ "$net" != "$e" ] && ports=$(echo "${e#*:}" | tr '-' ':')
+		rule "nm_ign_$i" src_ip "$SRC" proto udp ${net:+dest_ip} ${net:+$net} ${ports:+dest_port} ${ports:+$ports} use_policy nm_all
+	done
+}
+ignore_rules
 [ "$ALL_TRAFFIC" = 1 ] && gpc_rules  # before the QUIC rules: the devices' QUIC goes to the game WAN too
 for g in $WANS; do rule "nm_quic_g_$g" proto udp dest_port 443 ipset "nm_g_$g" use_policy "nm_oth_$g"; done
 rule nm_quic_all proto udp dest_port 443 use_policy nm_all
