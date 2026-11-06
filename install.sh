@@ -49,18 +49,22 @@ uci commit netmode
 	cp "files/${f#./}" "/${f#./}"
 done
 chmod 755 /etc/init.d/netmode /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/sbin/netmode-bot \
-	/usr/libexec/netmode/mwan3-rules /usr/libexec/netmode/notify /usr/libexec/netmode/regions /usr/libexec/rpcd/netmode
+	/usr/libexec/netmode/mwan3-rules /usr/libexec/netmode/notify /usr/libexec/netmode/regions /usr/libexec/rpcd/netmode \
+	/www/cgi-bin/netmode-ping /usr/sbin/netmode-relaywatch /etc/init.d/netmode-relaywatch
 
 for f in /etc/netmode/ /usr/sbin/netmode /usr/sbin/netmode-daemon /usr/sbin/netmode-sampler /usr/sbin/netmode-bot /usr/lib/netmode/ \
-	/etc/init.d/netmode /usr/libexec/netmode/ \
+	/etc/init.d/netmode /usr/libexec/netmode/ /usr/sbin/netmode-relaywatch /etc/init.d/netmode-relaywatch \
 	/usr/libexec/rpcd/netmode /usr/share/rpcd/acl.d/luci-app-netmode.json /usr/share/luci/menu.d/luci-app-netmode.json \
 	/www/luci-static/resources/netmode/ /www/luci-static/resources/view/netmode/ \
-	/www/luci-static/resources/view/status/include/15_netmode.js; do
+	/www/luci-static/resources/view/status/include/15_netmode.js /www/cgi-bin/netmode-ping; do
 	grep -qxF "$f" /etc/sysupgrade.conf || echo "$f" >> /etc/sysupgrade.conf
 done
 
 /etc/init.d/netmode enable
 /etc/init.d/netmode restart
+# the engarde relay watchdog: runs only while relay_engarde is set
+/etc/init.d/netmode-relaywatch enable
+/etc/init.d/netmode-relaywatch restart
 sleep 2
 /usr/libexec/netmode/mwan3-rules check   # rebuilds + restarts mwan3 only if the devices / WANs changed
 

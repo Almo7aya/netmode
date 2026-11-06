@@ -1,6 +1,6 @@
 #!/bin/sh
 # netmode-daemon — dynamic WAN sharing for mwan3.
-#  * game mode : the gaming devices' internet UDP uses the game WAN; everyone else uses all other WANs
+#  * game mode : the gaming devices' game UDP (to the game ports) uses the game WAN; everyone else uses all other WANs
 #  * all mode  : everyone uses all WANs (the gaming devices' UDP stays on the game WAN, ready for the next match)
 #  * game WAN  : gw_mode auto picks the best of cands between matches (20th-percentile ping to the probe target);
 #                gw_mode <wan> locks it at once and (move_flows) moves running matches there (the game freezes ~1 s)
@@ -23,7 +23,7 @@ load_conf() {
 	config_load netmode
 	config_get MODE main mode auto
 	config_get GAME_IPS main game_ip ""
-	config_get GAME_IGNORE main game_ignore ""
+	config_get GAME_PORTS main game_port "7777"
 	config_get GW_MODE main gw_mode auto
 	config_get WANS main wans ""; [ -n "$WANS" ] || WANS=$(mwan3_ifaces)
 	config_get GAME_ONLY main game_only ""

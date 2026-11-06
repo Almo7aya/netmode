@@ -2,7 +2,7 @@
 config netmode 'main'
 	# auto: game mode while a gaming device plays | game: always | all: never
 	option mode 'auto'
-	# gaming devices: their internet UDP gets the game WAN (e.g. list game_ip '192.168.1.50');
+	# gaming devices: their game UDP (to the game ports) gets the game WAN (e.g. list game_ip '192.168.1.50');
 	# changing the list rebuilds the mwan3 rules
 	# list game_ip ''
 	# game WAN: 'auto' picks the best of cands between matches, or a WAN name locks it at once
@@ -18,17 +18,23 @@ config netmode 'main'
 	# a relay's status page (JSON with cap / floor / ceiling / sending in kbit/s), shown on the dashboard while that
 	# relay is the game WAN; fetched every 2 s while a dashboard is open
 	# list relay_status 'relay:http://10.77.0.1:8780/'
+	# the relay's page on its VPS dashboard (relay-dash): its join attempts, matches and ping on the dashboard and in the
+	# match reports; fetched through the relay at most once a minute while a page shows it
+	# list relay_dash 'relay:http://10.77.0.1:8790/#p=1'
+	# a relay riding engarde over several WANs: restart engarde when one WAN sends but gets nothing back for 30 s
+	# (between matches; during one: a Telegram alert, the restart after it) — netmode-relaywatch
+	# list relay_engarde 'relay:/etc/engarde/client.yml'
 	# move running matches when the game WAN changes (the game freezes ~1 s)
 	option move_flows '1'
 	# 0: only the gaming devices' game UDP uses the game WAN | 1: all their traffic (one public IP for the game's
 	# backend and the match server; their downloads share the game WAN)
 	option game_all_traffic '0'
-	# game detection: a device uploads >= thresh UDP bytes per interval seconds; game mode ends hold s later.
-	# Low on purpose: launching the game / the lobby already start game mode, so nothing switches while a match loads
+	# the games' UDP ports ('port' or 'port-port'): only UDP to these counts as a game (game mode, match reports) and
+	# goes to the game WAN; VPN tunnels, voice chat and everything else don't. The Finals' match servers: 7777
+	list game_port '7777'
+	# game detection: a device uploads >= thresh bytes to the game ports per interval seconds; game mode ends hold s
+	# later. Low on purpose: a match starts loading at once
 	option thresh '8000'
-	# UDP from the gaming devices that isn't a game (not counted, kept off the game WAN): 'address[/bits]',
-	# ':port[-port]' or both. Discord voice calls use UDP 19294-19344
-	list game_ignore ':19294-19344'
 	option interval '10'
 	option hold '100'
 	# a match (match reports) needs >= match_thresh bytes per interval: above lobby and loading traffic

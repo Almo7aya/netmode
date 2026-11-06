@@ -3,7 +3,7 @@
 		"description": "Grant access to netmode (Status > Overview widget, Services > Netmode)",
 		"read": {
 			"ubus": {
-				"netmode": [ "status", "history", "live", "matches" ],
+				"netmode": [ "status", "history", "live", "matches", "vps" ],
 				"luci-rpc": [ "getHostHints" ]
 			},
 			"uci": [ "netmode", "mwan3", "network" ]

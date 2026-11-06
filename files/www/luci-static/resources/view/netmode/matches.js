@@ -48,9 +48,31 @@ function loadOf(m) {
 
 return view.extend({
 	device: '',
+	allJoins: false,
 
 	load: function() {
-		return Promise.all([ nm.matches(500), nm.status() ]);
+		return Promise.all([ nm.matches(500), nm.status(), nm.vps(30) ]);
+	},
+
+	// the relay's join attempts as its VPS dashboard saw them (relay_dash): failed ones too, which never become a match here
+	vpsCard: function() {
+		var self = this, v = this.vps;
+		if (!v || !v.configured) return '';
+		var link = E('a', { 'class': 'nm-btn', 'href': v.url, 'target': '_blank', 'rel': 'noopener' }, [ _('VPS dashboard') + ' ↗' ]);
+		var head = E('h3', {}, [ _('Joins through %s · from the VPS · last 30 days').format(nm.wl(this.st, v.wan)), link ]);
+		if (!v.summary) return E('div', { 'class': 'nm-card' }, [ head, E('em', { 'class': 'nm-note' }, [ v.error || _('No data from the VPS yet.') ]) ]);
+		var att = v.summary.attempts || [], more = '';
+		if (att.length > 15) {
+			more = E('button', { 'type': 'button', 'class': 'nm-btn', 'style': 'margin-top:8px' },
+				[ this.allJoins ? _('Show the latest 15') : _('Show all %d').format(att.length) ]);
+			more.addEventListener('click', function() { self.allJoins = !self.allJoins; self.draw(); });
+		}
+		return E('div', { 'class': 'nm-card' }, [ head, nm.vpsTiles(v.summary),
+			E('div', { 'style': 'margin-top:12px' }, [ nm.vpsJoins(att, this.allJoins ? 0 : 15, true) ]), more,
+			E('div', { 'class': 'nm-note', 'style': 'margin-top:8px' }, [
+				_('A join: the game server\'s floods less than 2 min apart, up to the match that follows. Sent during the join: what the VPS ' +
+				  'passed on to this router while the match loaded (its limit drops the rest). Ping: VPS ↔ this router through the relay; ' +
+				  'the game server is ~20 ms more.') ]) ]);
 	},
 
 	// "wan1>wan2" -> "Fibre → LTE" (display names from the running daemon)
@@ -75,6 +97,7 @@ return view.extend({
 		nm.css();
 		this.all = (data[0] && data[0].matches) || [];
 		this.st = data[1] || {};
+		this.vps = data[2];
 		this.root = E('div', { 'class': 'nm' });
 		this.draw();
 		var self = this;
@@ -97,7 +120,8 @@ return view.extend({
 		var ms = this.all.filter(function(m) { return !self.device || devOf(m) == self.device; });
 
 		if (!this.all.length) {
-			this.root.replaceChildren(E('div', { 'class': 'nm-card' }, [ E('em', {}, [ _('No matches recorded yet. Play a match and it shows up here when it ends.') ]) ]));
+			this.root.replaceChildren(E('div', { 'class': 'nm-card' }, [ E('em', {}, [ _('No matches recorded yet. Play a match and it shows up here when it ends.') ]) ]),
+				this.vpsCard());
 			return;
 		}
 
@@ -199,6 +223,7 @@ return view.extend({
 					E('span', {}, [ _('one dot per match, by game WAN; tick: median') ]) ]),
 				strip
 			]),
+			this.vpsCard(),
 			E('div', { 'class': 'nm-card' }, [
 				E('h3', {}, [ _('By game server cloud') ]),
 				cloudTable,

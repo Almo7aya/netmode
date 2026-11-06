@@ -24,10 +24,11 @@ weight() { for e in $WEIGHTS; do [ "${e%%:*}" = "$1" ] && { echo "${e#*:}"; retu
 # is the one their backend saw, so the device needs one public IP; 0: only its game UDP
 config_get_bool ALL_TRAFFIC main game_all_traffic 0
 GP=udp; [ "$ALL_TRAFFIC" = 1 ] && GP=all
-# the gaming devices' UDP that isn't game traffic (e.g. ':19294-19344', Discord voice calls): it stays off the game
-# WAN, like their other traffic ("address[/bits]", ":port[-port]" or both)
-config_get GAME_IGNORE main game_ignore ""
-SIG="$GAME_IPS|$WANS|$WEIGHTS|$GAME_ONLY|$DEPENDS|$ALL_TRAFFIC|$GAME_IGNORE"
+# the game's UDP ports ("port" or "port-port"): only that UDP goes to the game WAN (VPN tunnels, voice chat and the
+# rest stay on every WAN, like the devices' other traffic); mwan3 takes them as a multiport list ("7777,9000:9100")
+config_get GAME_PORTS main game_port "7777"
+GPORTS=$(echo $GAME_PORTS | tr ' -' ',:')
+SIG="$GAME_IPS|$WANS|$WEIGHTS|$GAME_ONLY|$DEPENDS|$ALL_TRAFFIC|$GAME_PORTS"
 # mwan3 hands src_ip to iptables -s, which expands a comma list into one rule per device
 SRC=$(for ip in $GAME_IPS; do printf '%s/32,' "$ip"; done); SRC=${SRC%,}
 
@@ -45,9 +46,12 @@ $UCI -q delete mwan3.default_rule_v4
 for s in $($UCI show mwan3 | sed -n 's/^mwan3\.\(nm_[a-z0-9_]*\)=.*/\1/p'); do $UCI -q delete "mwan3.$s"; done
 
 member() { $UCI set "mwan3.$1=member"; $UCI set "mwan3.$1.interface=$2"; $UCI set "mwan3.$1.metric=$3"; $UCI set "mwan3.$1.weight=$4"; }
-policy() { $UCI set "mwan3.$1=policy"; $UCI set "mwan3.$1.last_resort=default"; }
+# mwan3 skips a rule or policy whose name is longer than 15 characters (it only says so in the log): say it loudly
+toolong() { [ ${#1} -le 15 ] || { echo "netmode: mwan3 $2 name $1 is longer than 15 characters: mwan3 will skip it (shorten the WAN name)" >&2
+	logger -t netmode "mwan3 $2 $1 is longer than 15 characters: mwan3 skips it (shorten the WAN name)"; }; }
+policy() { toolong "$1" policy; $UCI set "mwan3.$1=policy"; $UCI set "mwan3.$1.last_resort=default"; }
 use()    { $UCI add_list "mwan3.$1.use_member=$2"; }
-rule()   { n=$1; shift; $UCI set "mwan3.$n=rule"; $UCI set "mwan3.$n.family=ipv4"
+rule()   { n=$1; shift; toolong "$n" rule; $UCI set "mwan3.$n=rule"; $UCI set "mwan3.$n.family=ipv4"
 	while [ $# -gt 1 ]; do $UCI set "mwan3.$n.$1=$2"; shift 2; done; }
 
 if [ "$1" = remove ]; then
@@ -81,31 +85,25 @@ for g in $WANS; do
 	done
 done
 
-# rules, first match wins (the nm_g_* / nm_gw_* ipsets are the switches the daemon flips); names <= 15 chars
-gpc_rules() {  # the gaming devices -> the game WAN
+# rules, first match wins (the nm_g_* / nm_gw_* ipsets are the switches the daemon flips); names <= 15 chars, so
+# the per-WAN ones are prefix + WAN name with short prefixes (nm_qg_<wan>; WAN names up to 7 characters fit
+# every name here, policies included)
+gpc_rules() {  # the gaming devices' game UDP (or with game_all_traffic all their traffic) -> the game WAN
 	if [ -n "$SRC" ]; then
-		for g in $WANS; do rule "nm_gpc_$g" src_ip "$SRC" proto $GP ipset "nm_gw_$g" use_policy "nm_game_$g"; done
-		rule nm_gpc_default src_ip "$SRC" proto $GP use_policy "nm_game_${CANDS%% *}"
+		if [ "$GP" = udp ]; then ports="dest_port $GPORTS"; else ports=""; fi
+		for g in $WANS; do rule "nm_gpc_$g" src_ip "$SRC" proto $GP $ports ipset "nm_gw_$g" use_policy "nm_game_$g"; done
+		rule nm_gpc_default src_ip "$SRC" proto $GP $ports use_policy "nm_game_${CANDS%% *}"
 	else
 		# no gaming devices yet: a placeholder that matches nothing keeps the build signature
 		rule nm_gpc_default src_ip 0.0.0.0/32 proto udp use_policy nm_all
 	fi
 	$UCI set "mwan3.nm_gpc_default.netmode_sig=$SIG"
 }
-ignore_rules() {  # before the gaming-device rules: what game_ignore lists uses every WAN
-	[ -n "$SRC" ] || return 0
-	i=0
-	for e in $GAME_IGNORE; do
-		i=$((i + 1)); net=${e%%:*}; ports=""; [ "$net" != "$e" ] && ports=$(echo "${e#*:}" | tr '-' ':')
-		rule "nm_ign_$i" src_ip "$SRC" proto udp ${net:+dest_ip} ${net:+$net} ${ports:+dest_port} ${ports:+$ports} use_policy nm_all
-	done
-}
-ignore_rules
 [ "$ALL_TRAFFIC" = 1 ] && gpc_rules  # before the QUIC rules: the devices' QUIC goes to the game WAN too
-for g in $WANS; do rule "nm_quic_g_$g" proto udp dest_port 443 ipset "nm_g_$g" use_policy "nm_oth_$g"; done
+for g in $WANS; do rule "nm_qg_$g" proto udp dest_port 443 ipset "nm_g_$g" use_policy "nm_oth_$g"; done
 rule nm_quic_all proto udp dest_port 443 use_policy nm_all
 [ "$ALL_TRAFFIC" = 1 ] || gpc_rules
-for g in $WANS; do rule "nm_oth_g_$g" proto all ipset "nm_g_$g" use_policy "nm_oth_$g"; done
+for g in $WANS; do rule "nm_og_$g" proto all ipset "nm_g_$g" use_policy "nm_oth_$g"; done
 rule default_rule_v4 dest_ip 0.0.0.0/0 proto all sticky 0 use_policy nm_all
 $UCI commit mwan3
 

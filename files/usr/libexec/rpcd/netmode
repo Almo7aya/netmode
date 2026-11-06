@@ -13,6 +13,10 @@
 #       '{"gw":"wan1","now":true}' switches now and keeps an auto game WAN auto; "by" names the source (default LuCI)
 #   ubus call netmode clear_matches
 #   ubus call netmode notify_test               send a Telegram test message with the saved settings
+#   ubus call netmode vps '{"days":1,"tz":180}'  the relay's own numbers from its VPS dashboard (relay_dash, relay-dash):
+#       {"configured":true,"wan":..,"url":<the dashboard page>,"days":1,"summary":{kpi, attempts, ...}} — the join
+#       attempts (failed ones too: netmode only sees matches), matches and ping as the VPS measured them.
+#       Fetched through the relay (mobile data), so at most once a minute per range.
 RUN=/var/run/netmode
 DATA=/etc/netmode
 
@@ -20,7 +24,7 @@ arg() { echo "$input" | jsonfilter -e "@.$1" 2>/dev/null; }
 
 case "$1" in
 list)
-	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str","now":true,"by":"str"},"clear_matches":{},"notify_test":{}}'
+	echo '{"status":{},"history":{"since":32},"live":{"since":32},"matches":{"limit":32},"set":{"mode":"str","gw":"str","now":true,"by":"str"},"clear_matches":{},"notify_test":{},"vps":{"days":32,"tz":32}}'
 	;;
 call)
 	read -r input
@@ -103,6 +107,24 @@ call)
 		res=$(/usr/libexec/netmode/notify -t 2>&1); ok=false
 		[ "$res" = sent ] && ok=true
 		printf '{"ok":%s,"result":"%s"}\n' "$ok" "$(echo "$res" | tr -d '"\\\n' | cut -c1-200)"
+		;;
+	vps)
+		# relay_dash 'wan:http://host:8790/#p=<id>': the relay's page on its VPS dashboard (the first entry)
+		e=$(uci -q get netmode.main.relay_dash | awk '{ print $1 }')
+		if [ -z "$e" ]; then echo '{"configured":false}'; exit 0; fi
+		wan=${e%%:*}; page=${e#*:}; base=${page%%#*}
+		p=$(echo "$page" | sed -n 's/.*[#?&]p=\([0-9][0-9]*\).*/\1/p')
+		days=$(arg days); case "$days" in 1|7|30) ;; *) days=1 ;; esac
+		tz=$(arg tz); case "$tz" in ''|*[!0-9-]*) tz=0 ;; esac
+		C=$RUN/vps.$days; now=$(date +%s)
+		if ! [ -s $C ] || [ $((now - $(date -r $C +%s))) -ge 60 ]; then
+			s=$(curl -s -m 8 "${base}api/summary?p=${p:-1}&from=$((now - days * 86400))&to=$((now + 1))&tz=$tz" 2>/dev/null)
+			case "$s" in
+				"{"*) printf '{"configured":true,"wan":"%s","url":"%s","days":%s,"summary":%s}\n' "$wan" "$page" "$days" "$s" > $C.tmp && mv $C.tmp $C ;;
+				*) [ -s $C ] || { printf '{"configured":true,"wan":"%s","url":"%s","days":%s,"error":"the VPS dashboard does not answer"}\n' "$wan" "$page" "$days"; exit 0; } ;;
+			esac
+		fi
+		cat $C
 		;;
 	*)
 		echo '{"error":"unknown method"}'

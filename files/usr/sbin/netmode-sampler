@@ -1,8 +1,9 @@
 #!/bin/sh
 # netmode-sampler — one sample per second for the live graphs: a ping through the game WAN to the probe target
-# and each gaming device's UDP upload and download. Keeps the last 15 minutes in /var/run/netmode/live:
+# and each gaming device's game UDP (to the game ports) upload and download. Keeps the last 15 minutes in /var/run/netmode/live:
 #   "ts ping_ms|-|n state game_wan ip=up_bytes,... ip=down_bytes,..."   (-: no reply, n: not measured)
-# The ping costs mobile data, so it only runs while a dashboard is open (rpcd touches /var/run/netmode/viewer);
+# The ping costs mobile data, so it only runs while a dashboard is open (rpcd touches /var/run/netmode/viewer) or
+# an overlay asks for it (/cgi-bin/netmode-ping touches /var/run/netmode/viewer_ping: the ping only, no relay status);
 # the upload numbers come from conntrack and are always recorded.
 # Each ping gets 2 s to answer (a congested WAN can be slower than 1 s without losing anything), so a second is
 # written 2 s after it starts: the pings overlap in 3 slots. The decisions stay with netmode-daemon.
@@ -15,7 +16,7 @@ KEEP=900
 load() {
 	config_load netmode
 	config_get GAME_IPS main game_ip ""
-	config_get GAME_IGNORE main game_ignore ""
+	config_get GAME_PORTS main game_port "7777"
 	config_get DEFAULT_TARGET main default_target 8.8.8.8
 	config_get_bool LIVE main live_ping 1
 	RELAY_STATUS=""
@@ -54,8 +55,9 @@ while true; do
 
 	rm -f "$RUN/live.ping.$slot"
 	viewed=0; [ -f $RUN/viewer ] && [ $((now - $(date -r $RUN/viewer +%s))) -lt 30 ] && viewed=1
+	pinged=$viewed; [ $viewed = 0 ] && [ -f $RUN/viewer_ping ] && [ $((now - $(date -r $RUN/viewer_ping +%s))) -lt 10 ] && pinged=1
 	relay_status "$gw" $viewed
-	if [ "$LIVE" = 1 ] && [ -n "$dev" ] && [ $viewed = 1 ]; then
+	if [ "$LIVE" = 1 ] && [ -n "$dev" ] && [ $pinged = 1 ]; then
 		ping -I "$dev" -c 1 -W 2 "$tgt" > "$RUN/live.ping.$slot" 2>/dev/null &
 		eval "pp_$slot=$!"
 	else

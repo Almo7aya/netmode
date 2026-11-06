@@ -70,7 +70,7 @@ return view.extend({
 		o.default = 'auto';
 
 		o = s.taboption('general', form.MultiValue, 'game_ip', _('Gaming devices'),
-			_('Their internet UDP (game traffic) gets the game WAN. Pick known devices or type an IPv4 address; use static ' +
+			_('Their game UDP (to the game ports, on the Detection tab) gets the game WAN. Pick known devices or type an IPv4 address; use static ' +
 			  'leases so the addresses don\'t change. Changing the list rebuilds the mwan3 rules (a short interruption for everyone).'));
 		o.create = true;
 		o.datatype = 'ip4addr("nomask")';
@@ -144,6 +144,25 @@ return view.extend({
 			return !value || /^[A-Za-z0-9_]+:https?:\/\/\S+$/.test(value) ? true : _('Use wan:http://address:port/');
 		};
 
+		o = s.taboption('general', form.DynamicList, 'relay_dash', _('Relay dashboard on the VPS'),
+			_('<code>relay:http://10.77.0.1:8790/#p=1</code>: the relay\'s page on its VPS dashboard (relay-dash). The dashboard shows its ' +
+			  'join attempts, matches and ping as the VPS measured them, and the match reports list every join it saw, failed ones too. ' +
+			  'Fetched through the relay at most once a minute, only while a page here shows it.'));
+		o.placeholder = 'relay:http://10.77.0.1:8790/#p=1';
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Za-z0-9_]+:https?:\/\/[^\s"\\]+#p=\d+$/.test(value) ? true : _('Use wan:http://address:port/#p=<relay id>');
+		};
+
+		o = s.taboption('general', form.DynamicList, 'relay_engarde', _('Relay engarde watchdog'),
+			_('<code>relay:/etc/engarde/client.yml</code>: a relay that rides engarde over several WANs, and its engarde client config. ' +
+			  'When one WAN keeps sending but gets nothing back for 30 s (e.g. a stale NAT mapping in a 4G router), engarde is restarted ' +
+			  '(<code>/etc/init.d/engarde restart</code>, a 1–2 s pause) — between matches; during a match through the relay you get a ' +
+			  'Telegram alert and the restart follows the match. Only the first entry is watched.'));
+		o.placeholder = 'relay:/etc/engarde/client.yml';
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Za-z0-9_]+:\/\S+$/.test(value) ? true : _('Use wan:/path/to/engarde-client.yml');
+		};
+
 		o = s.taboption('general', form.DynamicList, 'weight', _('WAN weights'),
 			_('Load-balancing weight per WAN as <code>wan:weight</code>, e.g. <code>wan1:4</code>; unlisted WANs get 1. ' +
 			  'Changing this rebuilds the mwan3 rules.'));
@@ -152,23 +171,26 @@ return view.extend({
 			return !value || /^[A-Za-z0-9_]+:[0-9]+$/.test(value) ? true : _('Use wan:weight, e.g. wan1:4');
 		};
 
+		o = s.taboption('detect', form.DynamicList, 'game_port', _('Game ports (UDP)'),
+			_('Only UDP from the gaming devices to these ports is a game: it starts game mode, makes the match reports and ' +
+			  'goes to the game WAN. VPN tunnels, voice chat and everything else don\'t count and stay on every WAN. ' +
+			  'As <code>port</code> or <code>port-port</code>; The Finals\' match servers use <code>7777</code>. ' +
+			  'Changing this rebuilds the mwan3 rules.'));
+		o.placeholder = '7777';
+		o.validate = function(section_id, value) {
+			var m = /^(\d{1,5})(?:-(\d{1,5}))?$/.exec(value || '');
+			if (!value) return true;
+			if (!m || +m[1] < 1 || +m[1] > 65535 || (m[2] && (+m[2] < +m[1] || +m[2] > 65535)))
+				return _('Use a port or port-port, e.g. 7777 or 27015-27030');
+			return true;
+		};
+
 		o = s.taboption('detect', form.Value, 'thresh', _('Game mode threshold (bytes)'),
-			_('Game mode starts when a gaming device uploads at least this much UDP in one interval (DNS, NTP, QUIC and LAN ' +
-			  'traffic don\'t count). Keep it low enough that launching the game / the lobby already start game mode, so ' +
-			  'nothing switches while a match loads. Measured with The Finals: launch and lobby 16–17 KB per 10 s, loading ' +
-			  'a match 20–46 KB, a match 110–400 KB.'));
+			_('Game mode starts when a gaming device uploads at least this much to the game ports in one interval. Keep it ' +
+			  'low: a match starts loading at once. Measured with The Finals: loading a match 20–46 KB per 10 s, a match ' +
+			  '110–400 KB.'));
 		o.datatype = 'uinteger';
 		o.placeholder = '8000';
-
-		o = s.taboption('detect', form.DynamicList, 'game_ignore', _('Not game traffic'),
-			_('UDP from the gaming devices that isn\'t a game: game mode and the match reports don\'t count it, and it stays ' +
-			  'off the game WAN. As <code>address/bits</code>, <code>:port-port</code> or both (<code>address/bits:port-port</code>); ' +
-			  'e.g. <code>:19294-19344</code> for Discord voice calls. Changing this rebuilds the mwan3 rules.'));
-		o.placeholder = ':19294-19344';
-		o.validate = function(section_id, value) {
-			return !value || /^(?=.)(\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?)?(:\d{1,5}(-\d{1,5})?)?$/.test(value) ? true :
-				_('Use address/bits, :port-port or both, e.g. :19294-19344');
-		};
 
 		o = s.taboption('detect', form.Value, 'match_thresh', _('Match threshold (bytes)'),
 			_('For the match reports: a match runs while a device uploads at least this much per interval (above lobby and loading traffic).'));

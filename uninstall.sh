@@ -5,12 +5,15 @@
 #   sh uninstall.sh   |   PURGE=1 sh uninstall.sh
 /etc/init.d/netmode stop 2>/dev/null
 /etc/init.d/netmode disable 2>/dev/null
+/etc/init.d/netmode-relaywatch stop 2>/dev/null
+/etc/init.d/netmode-relaywatch disable 2>/dev/null
 [ -x /usr/libexec/netmode/mwan3-rules ] && /usr/libexec/netmode/mwan3-rules remove
 for s in $(ipset list -n 2>/dev/null | grep -E '^nm_(gw|g)_'); do ipset destroy "$s" 2>/dev/null; done
 
 rm -f /usr/sbin/netmode /usr/sbin/netmode-daemon /etc/init.d/netmode /usr/libexec/rpcd/netmode \
 	/usr/share/rpcd/acl.d/luci-app-netmode.json /usr/share/luci/menu.d/luci-app-netmode.json \
-	/www/luci-static/resources/view/status/include/15_netmode.js
+	/www/luci-static/resources/view/status/include/15_netmode.js /www/cgi-bin/netmode-ping \
+	/usr/sbin/netmode-relaywatch /etc/init.d/netmode-relaywatch
 rm -rf /usr/libexec/netmode /www/luci-static/resources/netmode /www/luci-static/resources/view/netmode /var/run/netmode
 sed -i '\#^/etc/netmode/$#d; \#netmode#d' /etc/sysupgrade.conf
 if [ "$PURGE" = 1 ]; then

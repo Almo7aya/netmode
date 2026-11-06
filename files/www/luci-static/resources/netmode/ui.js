@@ -15,6 +15,7 @@ var callMatches = rpc.declare({ object: 'netmode', method: 'matches', params: [ 
 var callClear = rpc.declare({ object: 'netmode', method: 'clear_matches' });
 var callSetMode = rpc.declare({ object: 'netmode', method: 'set', params: [ 'mode' ] });
 var callSetGw = rpc.declare({ object: 'netmode', method: 'set', params: [ 'gw' ] });
+var callVps = rpc.declare({ object: 'netmode', method: 'vps', params: [ 'days', 'tz' ] });
 
 var SVGNS = 'http://www.w3.org/2000/svg';
 
@@ -88,6 +89,14 @@ var CSS = [
 	'.nm-cell-ping{grid-area:ping}.nm-cell-wans{grid-area:wans}.nm-cell-udp{grid-area:udp}',
 	'.nm-cell .nm-plot{flex:1;min-height:0}',
 	'.nm-cell .nm-legend{margin:4px 0 0}',
+	// the relay's numbers from the VPS in one line (the card does not fit on the monitor)
+	'.nm-mon-vps{display:flex;flex-wrap:wrap;align-items:center;gap:4px 22px;border:1px solid var(--nm-line);border-radius:10px;padding:6px 12px;background:var(--nm-fill)}',
+	'.nm-mon-vps .nm-label{margin:0}',
+	'.nm-mon-vps .it{white-space:nowrap}',
+	'.nm-mon-vps .it b{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}',
+	'.nm-mon-vps .it .m{opacity:.7}',
+	'.nm-mon-vps .bad{color:var(--nm-crit);font-weight:600}',
+	'.nm-mon-vps .grow{flex:1}',
 	'@media (max-width:1100px){.nm-mon-charts{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr);',
 	'grid-template-areas:"ping" "wans" "udp"}.nm-mon .nm-tiles{grid-template-columns:repeat(3,minmax(0,1fr))}}'
 ].join('');
@@ -125,6 +134,12 @@ function surfaceOf(node) {
 
 function fmt(v) { return String(+v.toFixed(v < 10 && v % 1 ? 1 : 0)); }
 
+// the VPS numbers: data in MB / GB, play time as "1 h 5 min" / "22 min"
+function vMB(v) { return v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(2) + ' GB' : Math.round(v) + ' MB'; }
+// a join whose match was the first server the VPS saw (relay-dash gives it 0 s to match)
+var STRAIGHT = 'the match was the first server the VPS saw: no separate loading before it';
+function vHours(s) { return s >= 3600 ? _('%d h %d min').format(Math.floor(s / 3600), Math.round(s % 3600 / 60)) : _('%d min').format(Math.round(s / 60)); }
+
 var hoverHide = function() {};
 
 return baseclass.extend({
@@ -139,6 +154,81 @@ return baseclass.extend({
 	live: function(since) { return L.resolveDefault(callLive(since || 0), { points: [] }); },
 	matches: function(limit) { return L.resolveDefault(callMatches(limit || 500), { matches: [] }); },
 	clearMatches: function() { return callClear(); },
+	// the relay's numbers from its VPS dashboard (relay_dash), over the last `days`; null when the call fails
+	vps: function(days) { return L.resolveDefault(callVps(days || 1, -new Date().getTimezoneOffset()), null); },
+
+	/* The VPS dashboard's view of the relay (relay-dash's summary): tiles for joins, matches, ping and data. The ping is
+	 * VPS <-> this router through the relay: the game server's leg (~20 ms from the VPS) comes on top. */
+	vpsTiles: function(sm) {
+		var k = sm.kpi || {}, nm = this, ms = function(v) { return v == null ? '—' : String(Math.round(v)); }, mb = vMB, hours = vHours;
+		var tile = function(label, value, unit, desc) {
+			return E('div', { 'class': 'nm-tile' }, [ E('div', { 'class': 'nm-label' }, [ label ]),
+				E('div', { 'class': 'v' }, [ value, unit ? E('small', {}, [ unit ]) : '' ]), E('div', { 'class': 'd' }, [ desc ]) ]);
+		};
+		return E('div', { 'class': 'nm-tiles', 'style': 'margin-top:4px' }, [
+			tile(_('Joins that worked'), k.attempts ? _('%d of %d').format(k.joined, k.attempts) : '—', '',
+				k.attempts ? _('%d failed').format(k.failed) + ' · ' + (k.ttm_med ? _('%s to get in (median)').format(nm.dur(k.ttm_med)) : _('median join: straight in')) : _('no joins in this range')),
+			tile(_('Matches'), String(k.matches || 0), '', k.matches ? _('%s played').format(hours(k.match_secs)) : _('none in this range')),
+			tile(_('Ping in matches'), ms(k.ping_med), k.ping_med != null ? 'ms' : '',
+				k.ping_p90 != null ? _('90%% under %s ms · 99%% under %s ms').format(ms(k.ping_p90), ms(k.ping_p99)) : _('VPS ↔ this router')),
+			tile(_('Lag spikes in matches'), String(k.spikes || 0), '', _('ping 500 ms or more · %s in total').format(nm.dur(k.spike_secs || 0))),
+			tile(_('Through the relay'), mb(k.down_mb), '', _('down · %s up').format(mb(k.up_mb)))
+		]);
+	},
+
+	/* The same numbers in one line for the full-screen monitor, plus the latest join: [nodes] */
+	vpsLine: function(sm) {
+		var k = sm.kpi || {}, nm = this, a = (sm.attempts || [])[0];
+		var it = function(value, label, title, extra) {
+			return E('span', { 'class': 'it', 'title': title || '' }, [ E('b', {}, [ value ]), ' ', E('span', { 'class': 'm' }, [ label ]) ].concat(extra || []));
+		};
+		var bad = function(t) { return E('span', { 'class': 'bad' }, [ t ]); };
+		var out = [
+			it(k.attempts ? _('%d of %d').format(k.joined, k.attempts) : '—', _('joins worked'),
+				k.attempts ? (k.ttm_med ? _('%s to get in (median)').format(nm.dur(k.ttm_med)) : _('median join: straight in')) : _('no joins in the last 24 h'),
+				k.failed ? [ ' · ', bad(_('%d failed').format(k.failed)) ] : []),
+			it(String(k.matches || 0), k.matches ? _('matches · %s').format(vHours(k.match_secs)) : _('matches')),
+			it(k.ping_med != null ? Math.round(k.ping_med) + ' ms' : '—', k.ping_p99 != null ? _('match ping · 99%% under %d').format(Math.round(k.ping_p99)) : _('match ping'),
+				_('VPS ↔ this router through the relay; the game server is ~20 ms more')),
+			it(String(k.spikes || 0), _('lag spikes'), _('ping 500 ms or more in matches · %s in total').format(nm.dur(k.spike_secs || 0))),
+			it(vMB(k.down_mb) + ' ↓ · ' + vMB(k.up_mb) + ' ↑', _('through the relay'))
+		];
+		if (a) {
+			var res = a.result == 'joined' ? _('joined') : a.result == 'joining' ? _('joining now') : bad(_('failed'));
+			out.push(E('span', { 'class': 'it', 'title': a.match ? (a.match.name || a.match.server) + (a.ttm ? '' : ' · ' + STRAIGHT) : '' }, [
+				E('span', { 'class': 'm' }, [ _('last join') + ' ' ]), E('b', {}, [ hhmm(a.start) ]), ' ', res,
+				E('span', { 'class': 'm' }, [ (a.ttm ? ' · ' + _('%s to match').format(nm.dur(a.ttm)) : a.match ? ' · ' + _('straight in') : '') +
+					' · ' + _('%.1f MB sent').format(a.flood_mb || 0) + (a.worst_ping != null ? ' · ' + _('worst ping %d ms').format(Math.round(a.worst_ping)) : '') ]) ]));
+		}
+		return out;
+	},
+
+	/* The join attempts the VPS saw (newest first; failed ones too, which never become a netmode match): floods less
+	 * than 2 min apart up to the match that follows. n: how many rows (0: all). */
+	vpsJoins: function(attempts, n, withDate) {
+		var nm = this, ms = function(v) { return v == null ? '—' : Math.round(v) + ' ms'; };
+		var when = function(ts) {
+			var d = new Date(ts * 1000);
+			return (withDate ? d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' : '') + hhmm(ts);
+		};
+		var th = function(h) { return E('th', { 'class': 'th' }, [ h ]); }, td = function(c, title) { return E('td', { 'class': 'td', 'title': title || '' }, [ c ]); };
+		var rows = n ? attempts.slice(0, n) : attempts;
+		if (!rows.length) return E('em', { 'class': 'nm-note' }, [ _('No joins in this range.') ]);
+		return E('table', { 'class': 'table' }, [
+			E('tr', { 'class': 'tr table-titles' }, [ _('Started'), _('Result'), _('Servers'), _('Time to match'), _('Sent during the join'),
+				_('Worst ping'), _('Match'), _('Match ping') ].map(th))
+		].concat(rows.map(function(a) {
+			var res = a.result == 'joined' ? _('joined') : a.result == 'joining' ? _('joining now') : _('failed');
+			return E('tr', { 'class': 'tr' }, [
+				td(when(a.start)), td(E('span', { 'style': a.result == 'failed' ? 'color:var(--nm-crit);font-weight:600' : '' }, [ res ])),
+				td(String(a.servers)), a.ttm ? td(nm.dur(a.ttm)) : a.match ? td(_('straight in'), STRAIGHT) : td('—'),
+				td(_('%.1f MB').format(a.flood_mb || 0), _('what the VPS passed on to this router while the match loaded (%s Mbit/s on average)').format(((a.avg_kbit || 0) / 1000).toFixed(2))),
+				td(ms(a.worst_ping)),
+				td(a.match ? (a.match.name || a.match.server) + ' · ' + nm.dur(a.match.end - a.match.start) : '—', a.match ? a.match.server : ''),
+				td(a.match ? ms(a.match.ping_med) : '—')
+			]);
+		})));
+	},
 
 	css: function() {
 		if (!document.getElementById('nm-css'))
@@ -485,16 +575,44 @@ return baseclass.extend({
 			cells[k] = c;
 		});
 		var cellNodes = [ cells.ping.node, cells.udp.node, cells.wans.node ];
+		// the relay's last 24 h as its VPS dashboard has them (relay_dash): hidden until it answers, refreshed every minute;
+		// a card on the dashboard, one line on the monitor
+		var vpsCard = E('div', { 'class': kiosk ? 'nm-mon-vps' : 'nm-card', 'style': 'display:none' });
 		if (kiosk) {
 			document.body.classList.add('nm-kiosk');
 			root.appendChild(bar);
 			root.appendChild(tiles);
+			root.appendChild(vpsCard);
 			root.appendChild(E('div', { 'class': 'nm-mon-charts' }, cellNodes));
 		} else {
 			var full = E('a', { 'class': 'nm-btn', 'href': L.url('admin/services/netmode/monitor'), 'title': _('Full-screen view for a second monitor (F11 for a full browser window)') }, [ '⛶ ' + _('Monitor') ]);
 			root.appendChild(E('div', { 'class': 'nm-card' }, [ E('h3', {}, [ _('Network mode'), live ]), bar, tiles ]));
 			root.appendChild(E('div', { 'class': 'nm-card' }, [ E('h3', {}, [ _('Graphs'), E('span', { 'class': 'nm-seg', 'style': 'margin:0' }, [ rangeBox, full ]) ]) ].concat(cellNodes)));
+			root.appendChild(vpsCard);
 		}
+		var drawVps = function(v) {
+			if (!v || !v.configured) { vpsCard.style.display = 'none'; return; }
+			vpsCard.style.display = '';
+			if (kiosk) {
+				vpsCard.replaceChildren.apply(vpsCard, [ E('span', { 'class': 'nm-label' }, [ _('%s on the VPS · 24 h').format(nm.wl(d.st, v.wan)) ]) ]
+					.concat(v.summary ? nm.vpsLine(v.summary) : [ E('em', { 'class': 'nm-note' }, [ v.error || _('No data from the VPS yet.') ]) ],
+						[ E('span', { 'class': 'grow' }), E('a', { 'class': 'nm-btn', 'href': v.url, 'target': '_blank', 'rel': 'noopener' }, [ _('VPS dashboard') + ' ↗' ]) ]));
+				return;
+			}
+			var head = E('h3', {}, [ _('%s on the VPS · last 24 h').format(nm.wl(d.st, v.wan)), E('span', { 'class': 'nm-seg', 'style': 'margin:0' }, [
+				E('a', { 'class': 'nm-btn', 'href': L.url('admin/services/netmode/matches') }, [ _('Every join') ]),
+				E('a', { 'class': 'nm-btn', 'href': v.url, 'target': '_blank', 'rel': 'noopener' }, [ _('VPS dashboard') + ' ↗' ]) ]) ]);
+			if (!v.summary) { vpsCard.replaceChildren(head, E('em', { 'class': 'nm-note' }, [ v.error || _('No data from the VPS yet.') ])); return; }
+			vpsCard.replaceChildren(head, nm.vpsTiles(v.summary),
+				E('div', { 'class': 'nm-block' }, [ E('div', { 'class': 'nm-bh' }, [ E('div', {}, [ E('div', { 'class': 't' }, [ _('Latest joins') ]),
+					E('div', { 'class': 's' }, [ _('as the VPS saw them: failed ones too, which never become a match here') ]) ]) ]),
+					nm.vpsJoins(v.summary.attempts || [], 5, false) ]),
+				E('div', { 'class': 'nm-note', 'style': 'margin-top:8px' }, [
+					_('Measured on the VPS: ping is VPS ↔ this router through the relay (the game server is ~20 ms more), data is what went through the relay.') ]));
+		};
+		var vpsTick = function() { return nm.vps(1).then(drawVps); };
+		vpsTick();
+		poll.add(vpsTick, 60);
 
 		var refresh = function() {
 			return nm.status().then(function(st) { merge(st); d.key = ''; drawBar(); drawTiles(); });
@@ -555,11 +673,16 @@ return baseclass.extend({
 			var devTile = tile(_('Gaming devices · UDP'), '↑ ' + kbs(total) + '  ↓ ' + kbs(totalDown), 'KB/s', devs.length ? devs.map(function(x) {
 				return E('div', {}, [ nm.devName(x) + ': ↑ ' + kbs(rate(x.ip)) + ' · ↓ ' + kbs(rate(x.ip, 'down')) + ' KB/s' + (x.playing ? ' · ' + _('playing') : '') ]);
 			}) : [ E('a', { 'href': L.url('admin/services/netmode/settings') }, [ _('pick your gaming devices in Settings') ]) ]);
-			// the game WAN relay's own status page (relay_status), e.g. an adaptive cap toward this router
+			// the game WAN relay's own status page (relay_status): the limiter's cap toward this router. An adaptive
+			// limiter can add its mode (a match loading: flood mode), what it reckons the path carries and the queue on it.
 			var rl = st.relay && st.relay.wan == st.gw && st.relay.status, mbit = function(k) { return (k / 1000).toFixed(1); };
-			var relayTile = rl && rl.cap != null ? tile(_('Relay cap'), mbit(rl.cap), 'Mbit/s', [
-				rl.busy ? _('adapting: a burst is coming through') : _('waiting at the start value'),
+			var v2 = rl && rl.mode != null;
+			var relayTile = rl && rl.cap != null ? tile(v2 && rl.mode == 'load' ? _('Relay limit · match loading') : _('Relay limit'), mbit(rl.cap), 'Mbit/s', [
+				v2 ? (rl.mode == 'load' ? _('flood mode: letting the match load through') : rl.busy ? _('following the traffic') : _('idle: resting at what the path carried lately'))
+					: rl.busy ? _('adapting: a burst is coming through') : _('waiting at the start value'),
 				E('div', {}, [ _('range %s–%s · sending %s Mbit/s').format(mbit(rl.floor), mbit(rl.ceiling), mbit(rl.sending || 0)) ]),
+				v2 && rl.capacity != null ? E('div', {}, [ _('path carries ~%s Mbit/s').format(mbit(rl.capacity)) +
+					(rl.queue != null ? ' · ' + _('queue on it %d ms').format(rl.queue) : '') ]) : '',
 				rl.ping != null ? E('div', {}, [ _('tunnel ping %d ms (unloaded %d)').format(rl.ping, rl.baseline) ]) : '' ]) : null;
 			if (kiosk) {
 				var kt = [

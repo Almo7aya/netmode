@@ -22,10 +22,10 @@ plentiful but each one's latency collapses as soon as somebody downloads on it.
 (With `game_all_traffic` on, *everything* the gaming devices send uses the game WAN, so a game's backend and its
 match server see the same public IP.)
 
-- **Detection** — every 10 s netmode reads the gaming devices' UDP uploads from conntrack (DNS, NTP, QUIC/443,
-  SSDP/mDNS and LAN traffic don't count). From 8 KB per 10 s a device counts as playing: launching the game and its
-  lobby already start game mode, so nothing switches while a match loads. Game mode ends 100 s after the last busy
-  interval. UDP that isn't a game (`game_ignore`, by default Discord voice calls) doesn't count.
+- **Detection** — every 10 s netmode reads the gaming devices' UDP uploads to the **game ports** (`game_port`, by
+  default 7777: The Finals' match servers) from conntrack. Nothing else counts: a VPN tunnel, voice chat or a
+  download is never taken for a game. From 8 KB per 10 s a device counts as playing, so game mode is on as soon as
+  a match starts loading. Game mode ends 100 s after the last busy interval.
 - **Choosing the game WAN** — netmode learns each match's server (the flow that moves ≥ 100 KB in 10 s) and looks
   up its cloud region in Google Cloud's and AWS's published address ranges. It then compares the WANs by the
   **round trip to that region** through each of them (HTTPS requests to Google's per-region test endpoint, or TCP
@@ -54,7 +54,7 @@ Measurements cost data on metered WANs, so netmode measures at full rate only wh
 | | Active | Otherwise |
 |---|---|---|
 | WAN probe rounds (~12 KB per WAN for a Google Cloud region, ~1 KB for AWS, 10 small pings otherwise) | every 60 s | every 15 min |
-| 1 ping per second for the live graph (~0.6 MB/h) | while a dashboard is open | off |
+| 1 ping per second for the live graph (~0.6 MB/h) | while a dashboard or the ping overlay is open | off |
 | 5 pings every 10 s for match reports and lag alerts (~0.3 MB/h) | yes | off |
 | Telegram bot (~8 KB per poll) | long polling | one check every 5 min (~2 MB/day) |
 
@@ -129,7 +129,11 @@ and adds the detour to the server's latency; what it can buy is resilience again
   one crosshair across all of them. WANs show their display names (`label`).
 - **Services → Netmode → Monitor** — the same live board in full screen for a second (wide) monitor: LuCI's menus
   are hidden and the charts are sized to the window, so everything fits without scrolling (press F11 for a full
-  browser window; ✕ goes back).
+  browser window; ✕ goes back). With `relay_dash` set, the relay's last 24 h from the VPS and its latest join sit in
+  one line above the charts.
+- **Ping overlay** (`overlay/`, a Windows app) — the game WAN ping on top of the game while it runs, from
+  `/cgi-bin/netmode-ping` (read-only, no login, LAN only; asking keeps the 1 s ping going for 10 s, without the
+  relay status fetches of an open dashboard). See [overlay/README.md](overlay/README.md).
 - **Services → Netmode → Match reports** — median ping per game WAN, a dot per match, the full list with each
   match's server region, filter by device.
 - **Services → Netmode → Settings** — everything below, including picking the gaming devices from the LAN's known hosts.
@@ -193,10 +197,12 @@ netmode matches [n]         the last n match reports
 | `cands` (list) | the normal `wans` | WANs `auto` chooses from |
 | `weight` (list) | 1 each | load-balancing weight, `wan:weight` (e.g. `wan1:4`) |
 | `label` (list) | interface names | display names for the dashboard, match reports and Telegram, `wan:name` (e.g. `wan1:Fibre`) |
-| `relay_status` (list) | — | `wan:url` of a relay's status page (JSON: `cap`, `floor`, `ceiling`, `sending` in kbit/s, `ping`, `baseline` in ms, `busy`), shown as a tile while that relay is the game WAN; fetched every 2 s while a dashboard is open |
+| `relay_status` (list) | — | `wan:url` of a relay's status page (JSON: `cap`, `floor`, `ceiling`, `sending` in kbit/s, `ping`, `baseline` in ms, `busy`; an adaptive limiter can add `mode`, `capacity`, `queue`), shown as a tile while that relay is the game WAN; fetched every 2 s while a dashboard is open |
+| `relay_dash` (list) | — | `wan:http://host:8790/#p=<id>`: the relay's page on its VPS dashboard (relay-dash). The dashboard gets a card with the last 24 h as the VPS measured them (joins that worked, matches, ping in matches, lag spikes, data, the latest joins) and the match reports list every join of the last 30 days, failed ones too (netmode itself only records matches). Fetched through the relay at most once a minute per range (~3 KB), only while a page shows it (`ubus call netmode vps`) |
+| `relay_engarde` (list) | — | `wan:/etc/engarde/client.yml`: a relay that rides [engarde](https://github.com/porech/engarde) over several WANs, and its engarde client config (`dstAddr`, `interfaceLabels`). `netmode-relaywatch` reads the engarde flows from conntrack every 10 s; when one WAN sends but gets nothing back for 30 s while another does (a stale NAT mapping in a 4G router, typically), the relay quietly rides on the others alone, so it restarts engarde (`/etc/init.d/engarde restart`, new sockets; the relay pauses 1–2 s) and says on Telegram (`alert`) whether every WAN answers again. During a match or a join through the relay it only alerts and restarts once that is over; a restart that did not help is retried after an hour. Only the first entry is watched |
 | `move_flows` | `1` | move running matches when the game WAN changes |
-| `thresh` | `8000` | UDP bytes uploaded per interval that start game mode |
-| `game_ignore` (list) | `:19294-19344` | the gaming devices' UDP that isn't a game, as `address[/bits]`, `:port[-port]` or both: not counted for game mode or the match reports, and kept off the game WAN (the default is Discord voice calls) |
+| `game_port` (list) | `7777` | the games' UDP ports, `port` or `port-port`: only UDP from the gaming devices to these counts for game mode and the match reports, and only it goes to the game WAN (everything else, VPN tunnels and voice chat included, uses every WAN) |
+| `thresh` | `8000` | bytes uploaded to the game ports per interval that start game mode |
 | `match_thresh` | `50000` | UDP bytes per interval that count as a match (reports) |
 | `interval` | `10` | seconds between measurements |
 | `hold` | `100` | seconds game mode stays on after the last busy interval |
@@ -234,9 +240,11 @@ rpcd object `netmode` (`ubus call netmode <method>`), used by the LuCI pages:
 files/                                         installed as-is on the router
 ├── etc/config/netmode                         default settings (kept on upgrade)
 ├── etc/init.d/netmode                         procd service: daemon + sampler + bot (START=18, before mwan3)
+├── etc/init.d/netmode-relaywatch              procd service for netmode-relaywatch (only with relay_engarde)
 ├── usr/sbin/netmode-daemon                    detection, game-WAN choice, probes, match reports
 ├── usr/sbin/netmode-sampler                   1 s samples for the live graphs
 ├── usr/sbin/netmode-bot                       Telegram commands and buttons (ucode)
+├── usr/sbin/netmode-relaywatch                restarts an engarde relay whose path went dead (relay_engarde)
 ├── usr/sbin/netmode                           command line
 ├── usr/lib/netmode/common.sh                  shared shell functions
 ├── usr/libexec/netmode/mwan3-rules            builds / removes the mwan3 policies and rules
@@ -245,12 +253,14 @@ files/                                         installed as-is on the router
 ├── usr/libexec/rpcd/netmode                   ubus API
 ├── usr/share/rpcd/acl.d/luci-app-netmode.json
 ├── usr/share/luci/menu.d/luci-app-netmode.json
+├── www/cgi-bin/netmode-ping                   the game WAN ping for the overlay (read-only, no login)
 └── www/luci-static/resources/
     ├── netmode/ui.js                          shared LuCI code: controls, charts, the live board
     ├── view/netmode/                          dashboard, monitor (full screen), match reports, settings
     └── view/status/include/15_netmode.js      Overview widget
 install.sh, uninstall.sh                       run on the router
 deploy.ps1, deploy.sh                          copy + install from a PC
+overlay/                                       the ping overlay for Windows (build.ps1 -> dist\NetmodeOverlay.exe)
 ```
 
 Runtime data lives in `/var/run/netmode/` (state, live samples, history) and `/etc/netmode/` (game WAN, probe

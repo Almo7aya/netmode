@@ -10,28 +10,16 @@ key_of() { echo "$1" | tr '.:' '__'; }
 # every mwan3 interface, for when the netmode config doesn't list the WANs
 mwan3_ifaces() { uci -q show mwan3 | sed -n 's/^mwan3\.\([^.=]*\)=interface$/\1/p' | tr '\n' ' '; }
 
-# the gaming devices' ($1, space-separated IPs) internet UDP flows, not DNS/NTP/QUIC/discovery/LAN, nor what
-# $GAME_IGNORE lists ("address[/bits]", ":port[-port]" or both, e.g. ":19294-19344" for Discord voice calls):
-# "upload_bytes dst flow_key src download_bytes" per flow (conntrack's original / reply direction)
+# the gaming devices' ($1, space-separated IPs) game flows: internet UDP to a port in $GAME_PORTS ("port" or
+# "port-port", e.g. "7777" for The Finals' match servers). Everything else (VPN tunnels, voice chat, QUIC, ...) is
+# not a game: "upload_bytes dst flow_key src download_bytes" per flow (conntrack's original / reply direction)
 udp_flows() {
-	awk -v ips="$1" -v ign="$GAME_IGNORE" '
-		function ip2n(ip,   o) { split(ip, o, "."); return ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4] }
-		function ignored(d, p,   i, q) {
-			for (i = 1; i <= NI; i++) {
-				if (p < PL[i] || p > PH[i]) continue
-				if (IB[i] < 0) return 1
-				q = 2 ^ (32 - IB[i]); if (int(ip2n(d) / q) == int(IN[i] / q)) return 1
-			}
-			return 0
-		}
+	awk -v ips="$1" -v gp="$GAME_PORTS" '
+		function game(p,   i) { for (i = 1; i <= NP; i++) if (p >= PL[i] && p <= PH[i]) return 1; return 0 }
 		BEGIN {
 			n = split(ips, a, " "); for (i = 1; i <= n; i++) G[a[i]] = 1
-			NI = split(ign, e, " ")
-			for (i = 1; i <= NI; i++) {
-				net = e[i]; ports = ""; c = index(net, ":"); if (c) { ports = substr(net, c + 1); net = substr(net, 1, c - 1) }
-				IB[i] = -1; if (net != "") { s = index(net, "/"); IB[i] = s ? substr(net, s + 1) + 0 : 32; IN[i] = ip2n(s ? substr(net, 1, s - 1) : net) }
-				PL[i] = 0; PH[i] = 65535; if (ports != "") { d = index(ports, "-"); PL[i] = (d ? substr(ports, 1, d - 1) : ports) + 0; PH[i] = (d ? substr(ports, d + 1) : ports) + 0 }
-			}
+			NP = split(gp, e, " ")
+			for (i = 1; i <= NP; i++) { d = index(e[i], "-"); PL[i] = (d ? substr(e[i], 1, d - 1) : e[i]) + 0; PH[i] = (d ? substr(e[i], d + 1) : e[i]) + 0 }
 		}
 		$3 != "udp" { next }
 		{
@@ -43,10 +31,8 @@ udp_flows() {
 				else if (dport == "" && $i ~ /^dport=/) dport = substr($i, 7)
 				else if ($i ~ /^bytes=/) { if (up == "") up = substr($i, 7); else { down = substr($i, 7); break } }
 			}
-			if (!(src in G)) next
-			if (dport == 53 || dport == 123 || dport == 443 || dport == 5353 || dport == 1900) next
+			if (!(src in G) || !game(dport + 0)) next
 			if (dst ~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|22[4-9]\.|23[0-9]\.|255\.)/) next
-			if (NI && ignored(dst, dport + 0)) next
 			print up + 0, dst, src ">" dst ":" dport ":" sport, src, down + 0
 		}' /proc/net/nf_conntrack 2>/dev/null
 }

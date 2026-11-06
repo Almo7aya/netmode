@@ -1,0 +1,34 @@
+#!/bin/sh
+# netmode-ping: the game WAN ping for an overlay on a LAN PC (netmode overlay/): read-only and without a login, so
+# it says no more than the ping, the game WAN and the mode. The firewall keeps it off the WANs (uhttpd on the LAN).
+#   GET /cgi-bin/netmode-ping?since=<ts>
+#   {"ts":<now>,"running":true,"state":"game|all","gw":"relay","label":"Relay","match":<start>|null,
+#    "avg":{"ping":..,"jitter":..,"loss":..}|null,   the daemon's latest 5 pings (every 10 s while someone plays)
+#    "points":[[ts,ping|null|false],...]}             the sampler's 1 s pings after <since>, 2 min at most
+#                                                     (null: no reply, false: not measured)
+# Asking keeps the 1 s ping going for 10 s (like an open dashboard, without its relay status fetches), so the
+# ping costs data only while an overlay shows it.
+RUN=/var/run/netmode
+S=$RUN/status.json
+now=$(date +%s)
+printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+if ! [ -s $S ] || ! [ -f $RUN/pid ] || [ $((now - $(date -r $S +%s))) -ge 120 ]; then
+	echo "{\"ts\":$now,\"running\":false}"
+	exit 0
+fi
+touch $RUN/viewer_ping
+
+since=$(echo "$QUERY_STRING" | sed -n 's/^\(.*&\)\{0,1\}since=\([0-9]\{1,10\}\).*$/\2/p')
+[ -n "$since" ] && [ "$since" -ge $((now - 120)) ] || since=$((now - 120))
+
+gw=""; state=""; mstart=""; pavg=""; ploss=""; pjit=""
+eval "$(jsonfilter -i $S -e 'gw=@.gw' -e 'state=@.state' -e 'mstart=@.match.start' \
+	-e 'pavg=@.ping.avg' -e 'ploss=@.ping.loss' -e 'pjit=@.ping.jitter' 2>/dev/null)"
+label=""; [ -n "$gw" ] && label=$(jsonfilter -i $S -e "@.labels[\"$gw\"]" 2>/dev/null | sed 's/\\/\\\\/g; s/"/\\"/g')
+avg=null; [ -n "$pavg" ] && avg="{\"ping\":$pavg,\"jitter\":${pjit:-null},\"loss\":${ploss:-null}}"
+
+printf '{"ts":%s,"running":true,"state":"%s","gw":"%s","label":"%s","match":%s,"avg":%s,"points":[' \
+	"$now" "$state" "$gw" "${label:-$gw}" "${mstart:-null}" "$avg"
+[ -s $RUN/live ] && tail -n 130 $RUN/live | awk -v s="$since" '
+	$1 > s && NF >= 4 { printf "%s[%s,%s]", (c++ ? "," : ""), $1, ($2 == "-" ? "null" : ($2 == "n" ? "false" : $2)) }'
+echo ']}'
